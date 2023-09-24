@@ -1,0 +1,173 @@
+#!/bin/bash
+# sk8 - package manager for rollerblades (https://github.com/chr1573r/rollerblades)
+
+
+
+# Function to load configuration from file or set default values
+load_config() {
+
+  if [[ -z "$SK8_DIR" ]]; then
+      SK8_DIR="$HOME/.sk8"
+  fi
+
+  if ! [[ -d "$SK8_DIR" ]]; then
+    echo "Setup: Initializing sk8 dir in '$SK8_DIR'"
+    mkdir "$SK8_DIR"
+  fi
+
+  if [[ -f "$SK8_DIR/config" ]]; then
+    source "$SK8_DIR/config"
+  else
+    echo "Warning: sk8 config could not be loaded, using defaults"
+    # Default values
+    #PATH_FILE="$HOME/.bashrc"
+  fi
+
+  if [[ -z "$SK8_RB_URL" ]]; then
+    echo "Error: Rollerblades url not set. Aborting"
+    exit 1
+  fi
+
+  if ! [[ -f "$SK8_DIR/rollerblades.pub" ]]; then
+    echo "Setup: Downloading a local copy of rb repo public key..."
+    curl -s "${SK8_RB_URL}/rollerblades.pub" -o "$SK8_DIR/rollerblades.pub" || {
+    echo "Error: Failed to download public key for package verification."
+    exit 1
+    }
+  fi
+} 
+
+# Function to verify package integrity
+verify_package() {
+  package="$1"
+  url="${SK8_RB_URL}/$package"
+  signature_url="${SK8_RB_URL}/$package.signature"
+
+  # Verify package signature
+  echo "Verifying package $package..."
+  curl -s "$signature_url" -o "$SK8_DIR/$package.signature" || {
+    echo "Error: Failed to download package signature for $package."
+    return 1
+  }
+
+  openssl dgst -verify "$SK8_DIR/rollerblades.pub" -signature "$SK8_DIR/$package.signature" "$SK8_DIR/$package.tar.gz" >/dev/null 2>&1 || {
+    echo "Error: Package $package signature verification failed."
+    return 1
+  }
+
+  echo "Package $package has been verified."
+}
+
+# Function to install a package
+install_package() {
+  package="$1"
+  url="${SK8_RB_URL}/$package.tar.gz"
+
+  echo "Installing $package..."
+  mkdir -p "$SK8_DIR/$package"
+  curl -s "$url" -o "$SK8_DIR/$package.tar.gz" || {
+    echo "Error: Failed to download package $package."
+    return 1
+  }
+
+  verify_package "$package" || {
+    echo "Error: Failed to verify package $package."
+    return 1
+  }
+
+  tar -xvz -C "$SK8_DIR/$package" -f "$SK8_DIR/$package.tar.gz" || {
+    echo "Error: Failed to extract package $package."
+    return 1
+  }
+
+  # Add package executables to the user's path
+  #echo "export PATH=\"$SK8_DIR/$package:\$PATH\"" >> "$PATH_FILE"
+  #source "$PATH_FILE"
+
+  echo "$package has been installed."
+}
+
+# Function to remove a package
+remove_package() {
+  if [[ "$1" == "" ]]; then 
+    echo "Error: No package specified."
+    return 1
+  fi
+  package="$1"
+
+  if [[ ! -d "$SK8_DIR/$package" ]]; then
+    echo "Package $package is not installed."
+    return
+  fi
+
+  echo "Removing $package..."
+  #rm -r "${SK8_DIR}/${package}" || {
+  #  echo "Error: Failed to remove $package."
+  #  return 1
+  #}
+
+  # Remove package executables from the user's path
+  #sed -i "/$package/d" "$PATH_FILE"
+  #source "$PATH_FILE"
+
+  echo "$package has been removed."
+}
+
+# Function to update a package
+update_package() {
+  if [[ "$1" == "" ]]; then 
+    echo "Error: No package specified."
+    return 1
+  fi
+  package="$1"
+  url="${SK8_RB_URL}/$package.tar.gz"
+
+  if [[ ! -d "$SK8_DIR/$package" ]]; then
+    echo "Package $package is not installed."
+    return
+  fi
+
+  echo "Updating $package..."
+
+  curl -s "$url" -o "$SK8_DIR/$package.tar.gz" || {
+    echo "Error: Failed to download package $package."
+    return 1
+  }
+
+  verify_package "$package" || {
+    echo "Error: Failed to verify package $package."
+    return 1
+  }
+
+  #rm -r "${SK8_DIR}/${package}" || {
+  #  echo "Error: Failed to update $package."
+  #  return 1
+  #}
+
+  tar -xvz -C "$SK8_DIR/$package" -f "$SK8_DIR/$package.tar.gz" || {
+    echo "Error: Failed to extract package $package."
+    return 1
+  }
+
+  echo "$package has been updated."
+}
+
+# Main script
+load_config
+
+case "$1" in
+  install)
+    install_package "$2"
+    ;;
+  remove)
+    remove_package "$2"
+    ;;
+  update)
+    update_package "$2"
+    ;;
+  *)
+    echo "Usage: $0 [install|remove|update] package_name"
+    exit 1
+    ;;
+esac
+
