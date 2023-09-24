@@ -11,8 +11,24 @@ load_config() {
   fi
 
   if ! [[ -d "$SK8_DIR" ]]; then
-    echo "Setup: Initializing sk8 dir in '$SK8_DIR'"
+    echo "Setup: Initializing sk8 dir '$SK8_DIR'"
     mkdir "$SK8_DIR"
+  fi
+
+  if ! [[ -d "$SK8_DIR" ]]; then
+    echo "Error: Cannot access sk8 dir '$SK8_DIR'"
+    exit 1
+  fi
+
+  if ! [[ -d "$SK8_DIR/cache" ]]; then
+    echo "Setup: Initializing cache dir in '$SK8_DIR'"
+    mkdir "$SK8_DIR/cache"
+  fi
+
+
+  if ! [[ -d "$SK8_DIR/package" ]]; then
+    echo "Setup: Initializing package dir in '$SK8_DIR'"
+    mkdir "$SK8_DIR/package"
   fi
 
   if [[ -f "$SK8_DIR/config" ]]; then
@@ -28,29 +44,40 @@ load_config() {
     exit 1
   fi
 
-  if ! [[ -f "$SK8_DIR/rollerblades.pub" ]]; then
+  if ! [[ -f "$SK8_DIR/cache/rollerblades.pub" ]]; then
     echo "Setup: Downloading a local copy of rb repo public key..."
-    curl -s "${SK8_RB_URL}/rollerblades.pub" -o "$SK8_DIR/rollerblades.pub" || {
-    echo "Error: Failed to download public key for package verification."
+    dl rollerblades.pub || {
+    echo "Error: Failed to download repo public key for package verification."
     exit 1
     }
   fi
+
 } 
+
+# Curl wrapper for any download activity
+dl(){
+
+  echo "Downloading '$1'"
+
+  curl -s "${SK8_RB_URL}/$1" -o "$SK8_DIR/cache/$1" || {
+    echo "Error: Failed to download '${SK8_RB_URL}/$1'"
+    return 1
+  }
+
+}
 
 # Function to verify package integrity
 verify_package() {
   package="$1"
-  url="${SK8_RB_URL}/$package"
-  signature_url="${SK8_RB_URL}/$package.signature"
 
   # Verify package signature
   echo "Verifying package $package..."
-  curl -s "$signature_url" -o "$SK8_DIR/$package.signature" || {
+  dl "$package.signature" || {
     echo "Error: Failed to download package signature for $package."
     return 1
   }
 
-  openssl dgst -verify "$SK8_DIR/rollerblades.pub" -signature "$SK8_DIR/$package.signature" "$SK8_DIR/$package.tar.gz" >/dev/null 2>&1 || {
+  openssl dgst -verify "$SK8_DIR/cache/rollerblades.pub" -signature "$SK8_DIR/cache/$package.signature" "$SK8_DIR/cache/$package.tar.gz" >/dev/null 2>&1 || {
     echo "Error: Package $package signature verification failed."
     return 1
   }
@@ -63,28 +90,33 @@ install_package() {
   package="$1"
   url="${SK8_RB_URL}/$package.tar.gz"
 
+  if [[ -d "$SK8_DIR/package/$package" ]]; then
+    echo "Package '$package' is already installed."
+    return
+  fi
+
   echo "Installing $package..."
-  mkdir -p "$SK8_DIR/$package"
-  curl -s "$url" -o "$SK8_DIR/$package.tar.gz" || {
-    echo "Error: Failed to download package $package."
+  mkdir -p "$SK8_DIR/package/$package"
+  dl "$package.tar.gz" || {
+    echo "Error: Failed to download package '$package'."
     return 1
   }
 
   verify_package "$package" || {
-    echo "Error: Failed to verify package $package."
+    echo "Error: Failed to verify package '$package'."
     return 1
   }
 
-  tar -xvz -C "$SK8_DIR/$package" -f "$SK8_DIR/$package.tar.gz" || {
-    echo "Error: Failed to extract package $package."
+  tar -xvz -C "$SK8_DIR/package/$package" -f "$SK8_DIR/cache/$package.tar.gz" || {
+    echo "Error: Failed to extract package '$package'."
     return 1
   }
 
   # Add package executables to the user's path
-  #echo "export PATH=\"$SK8_DIR/$package:\$PATH\"" >> "$PATH_FILE"
+  #echo "export PATH=\"$SK8_DIR/package/$package:\$PATH\"" >> "$PATH_FILE"
   #source "$PATH_FILE"
 
-  echo "$package has been installed."
+  echo "'$package' has been installed in '$SK8_DIR/package/$package'"
 }
 
 # Function to remove a package
@@ -95,16 +127,16 @@ remove_package() {
   fi
   package="$1"
 
-  if [[ ! -d "$SK8_DIR/$package" ]]; then
+  if [[ ! -d "$SK8_DIR/package/$package" ]]; then
     echo "Package $package is not installed."
     return
   fi
 
   echo "Removing $package..."
-  #rm -r "${SK8_DIR}/${package}" || {
-  #  echo "Error: Failed to remove $package."
-  #  return 1
-  #}
+  rm -r "${SK8_DIR}/package/${package}" || {
+    echo "Error: Failed to remove $package."
+    return 1
+  }
 
   # Remove package executables from the user's path
   #sed -i "/$package/d" "$PATH_FILE"
@@ -122,14 +154,14 @@ update_package() {
   package="$1"
   url="${SK8_RB_URL}/$package.tar.gz"
 
-  if [[ ! -d "$SK8_DIR/$package" ]]; then
+  if [[ ! -d "$SK8_DIR/package/$package" ]]; then
     echo "Package $package is not installed."
     return
   fi
 
   echo "Updating $package..."
 
-  curl -s "$url" -o "$SK8_DIR/$package.tar.gz" || {
+    dl "$package.tar.gz" || {
     echo "Error: Failed to download package $package."
     return 1
   }
@@ -144,7 +176,7 @@ update_package() {
   #  return 1
   #}
 
-  tar -xvz -C "$SK8_DIR/$package" -f "$SK8_DIR/$package.tar.gz" || {
+  tar -xvz -C "$SK8_DIR/package/$package" -f "$SK8_DIR/cache/$package.tar.gz" || {
     echo "Error: Failed to extract package $package."
     return 1
   }
@@ -165,8 +197,12 @@ case "$1" in
   update)
     update_package "$2"
     ;;
+  reinstall|force-install|re-install)
+    remove_package "$2"
+    install_package "$2"
+    ;;
   *)
-    echo "Usage: $0 [install|remove|update] package_name"
+    echo "Usage: $0 [install|reinstall|remove|update] package_name"
     exit 1
     ;;
 esac
