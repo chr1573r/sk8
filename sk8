@@ -1,6 +1,39 @@
 #!/bin/bash
 # sk8 - package manager for rollerblades (https://github.com/chr1573r/rollerblades)
 
+# Maximum sizes for server-provided content (security limits)
+MAX_MOTD_SIZE=4096
+MAX_INDEX_SIZE=65536
+
+# Sanitize text from server to prevent terminal escape attacks
+# Removes ANSI sequences, control chars, limits length
+sanitize_text() {
+  local max_len="${1:-4096}"
+  # Remove ANSI escape sequences, keep only printable chars and newlines
+  # Then truncate to max length
+  sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tr -cd '[:print:]\n' | head -c "$max_len"
+}
+
+# Display MOTD from server (if available)
+show_motd() {
+  local motd_file="$SK8_DIR/cache/motd.txt"
+  if [[ -f "$motd_file" ]]; then
+    echo ""
+    echo "--- Server Message ---"
+    sanitize_text "$MAX_MOTD_SIZE" < "$motd_file"
+    echo ""
+    echo "----------------------"
+  fi
+}
+
+# Fetch MOTD from server (optional, don't fail if missing)
+fetch_motd() {
+  curl -sSf --connect-timeout 5 --max-time 10 "${SK8_RB_URL}/motd.txt" 2>/dev/null | \
+    sanitize_text "$MAX_MOTD_SIZE" > "$SK8_DIR/cache/motd.txt.tmp" && \
+    mv "$SK8_DIR/cache/motd.txt.tmp" "$SK8_DIR/cache/motd.txt" || \
+    rm -f "$SK8_DIR/cache/motd.txt.tmp" "$SK8_DIR/cache/motd.txt"
+}
+
 # Interactive setup wizard
 run_setup() {
   echo "Welcome to sk8 - package manager for rollerblades"
@@ -48,7 +81,16 @@ run_setup() {
   # Try to fetch server info
   local pkg_count="unknown"
   if curl -sSf --connect-timeout 5 "$server_url/packages.txt" -o "$tmp_dir/packages.txt" 2>/dev/null; then
+    # Sanitize before counting
+    sanitize_text "$MAX_INDEX_SIZE" < "$tmp_dir/packages.txt" > "$tmp_dir/packages.txt.clean"
+    mv "$tmp_dir/packages.txt.clean" "$tmp_dir/packages.txt"
     pkg_count=$(grep -cv '^#' "$tmp_dir/packages.txt" 2>/dev/null || echo "0")
+  fi
+
+  # Try to fetch MOTD
+  local motd=""
+  if curl -sSf --connect-timeout 5 "$server_url/motd.txt" -o "$tmp_dir/motd.txt" 2>/dev/null; then
+    motd=$(sanitize_text "$MAX_MOTD_SIZE" < "$tmp_dir/motd.txt")
   fi
 
   echo ""
@@ -57,6 +99,13 @@ run_setup() {
   echo "  URL:         $server_url"
   echo "  Packages:    $pkg_count available"
   echo "  Key SHA256:  ${fingerprint:0:16}...${fingerprint: -16}"
+
+  if [[ -n "$motd" ]]; then
+    echo ""
+    echo "  Server message:"
+    echo "$motd" | sed 's/^/    /'
+  fi
+
   echo ""
   echo "The authenticity of this server cannot be established."
   read -rp "Do you want to trust this server? (yes/no): " trust_response
@@ -78,6 +127,11 @@ run_setup() {
   # Copy packages.txt if we got it
   if [[ -f "$tmp_dir/packages.txt" ]]; then
     cp "$tmp_dir/packages.txt" "$SK8_DIR/cache/packages.txt"
+  fi
+
+  # Copy motd.txt if we got it
+  if [[ -f "$tmp_dir/motd.txt" ]]; then
+    cp "$tmp_dir/motd.txt" "$SK8_DIR/cache/motd.txt"
   fi
 
   echo ""
@@ -326,7 +380,15 @@ fetch_index() {
     echo "Error: Failed to fetch package index."
     return 1
   }
+  # Sanitize the downloaded index
+  sanitize_text "$MAX_INDEX_SIZE" < "$SK8_DIR/cache/packages.txt" > "$SK8_DIR/cache/packages.txt.tmp" && \
+    mv "$SK8_DIR/cache/packages.txt.tmp" "$SK8_DIR/cache/packages.txt"
+
   echo "Package index updated."
+
+  # Fetch and display MOTD if available
+  fetch_motd
+  show_motd
 }
 
 # List available packages from index
@@ -338,18 +400,24 @@ list_available() {
     return 1
   fi
 
+  # Show MOTD if available
+  show_motd
+
   echo "Available packages:"
+  # Read sanitized content
   while IFS= read -r pkg; do
     # Skip empty lines and comments
     [[ -z "$pkg" || "$pkg" =~ ^# ]] && continue
 
-    # Check if installed
-    if [[ -d "$SK8_DIR/package/$pkg" ]]; then
-      echo "  $pkg [installed]"
-    else
-      echo "  $pkg"
+    # Extra validation: only show valid package names
+    if [[ "$pkg" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] && [[ ! "$pkg" =~ \.\. ]]; then
+      if [[ -d "$SK8_DIR/package/$pkg" ]]; then
+        echo "  $pkg [installed]"
+      else
+        echo "  $pkg"
+      fi
     fi
-  done < "$index"
+  done < <(sanitize_text "$MAX_INDEX_SIZE" < "$index")
 }
 
 # List installed packages

@@ -83,6 +83,7 @@ SK8_RB_URL="https://packages.example.com"
 ├── config              # Configuration file
 ├── cache/              # Downloaded packages and signatures
 │   ├── packages.txt    # Package index
+│   ├── motd.txt        # Server message (if provided)
 │   └── rollerblades.pub # Server public key
 └── package/            # Installed packages
     ├── my-tool/
@@ -95,7 +96,16 @@ SK8_RB_URL="https://packages.example.com"
 - All packages are verified against the server's public key (SHA256)
 - Package names are sanitized to prevent path traversal attacks
 - Failed verifications automatically clean up cached files
+- Server messages (MOTD) are sanitized to prevent terminal escape attacks
 - Run `sk8 setup` to reconfigure and trust a different server
+
+## Server Messages
+
+If the rollerblades server provides a `motd.txt`, sk8 will display it:
+- During setup (shows server's welcome message)
+- When running `sk8 update` or `sk8 list`
+
+All server-provided content is sanitized (ANSI escapes removed, length limited) for security.
 
 ## Examples
 
