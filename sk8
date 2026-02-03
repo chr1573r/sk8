@@ -6,12 +6,12 @@ MAX_MOTD_SIZE=4096
 MAX_INDEX_SIZE=65536
 
 # Sanitize text from server to prevent terminal escape attacks
-# Removes ANSI sequences, control chars, limits length
+# Removes ANSI sequences, limits length
 sanitize_text() {
   local max_len="${1:-4096}"
-  # Remove ANSI escape sequences, keep only printable chars and newlines
-  # Then truncate to max length
-  sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tr -cd '[:print:]\n' | head -c "$max_len"
+  # Remove ANSI escape sequences, then truncate to max length
+  # Using perl-style escape removal that works across platforms
+  sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b[^[]*//g' | head -c "$max_len"
 }
 
 # Display MOTD from server (if available)
