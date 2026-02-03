@@ -12,28 +12,45 @@ A lightweight package manager for [rollerblades](https://github.com/chr1573r/rol
 
 ## Quick Start
 
+Just run sk8 - it will guide you through setup:
+
 ```bash
-# Configure server URL
-mkdir -p ~/.sk8
-echo 'SK8_RB_URL="https://packages.example.com"' > ~/.sk8/config
+$ sk8
 
-# Fetch package index
-sk8 update
+Welcome to sk8 - package manager for rollerblades
+==================================================
 
-# List available packages
-sk8 list
+No configuration found. Let's set things up!
 
-# Install a package
-sk8 install my-tool
+Enter rollerblades server URL: https://packages.example.com
 
-# Upgrade all packages
-sk8 upgrade
+Connecting to https://packages.example.com...
+
+Server found!
+
+  URL:         https://packages.example.com
+  Packages:    5 available
+  Key SHA256:  a1b2c3d4e5f6g7h8...i9j0k1l2m3n4o5p6
+
+The authenticity of this server cannot be established.
+Do you want to trust this server? (yes/no): yes
+
+Setup complete!
+```
+
+Then use sk8 normally:
+
+```bash
+sk8 list              # Show available packages
+sk8 install my-tool   # Install a package
+sk8 upgrade           # Upgrade all packages
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
+| `sk8 setup` | Interactive setup wizard |
 | `sk8 update` | Fetch package index from server |
 | `sk8 upgrade` | Upgrade all installed packages |
 | `sk8 upgrade <pkg>` | Upgrade a specific package |
@@ -74,10 +91,11 @@ SK8_RB_URL="https://packages.example.com"
 
 ## Security
 
-- All packages are verified against the server's public key
-- SHA256 signatures are checked before extraction
+- **Trust on first use**: On first run, sk8 shows the server's key fingerprint and asks you to verify
+- All packages are verified against the server's public key (SHA256)
 - Package names are sanitized to prevent path traversal attacks
 - Failed verifications automatically clean up cached files
+- Run `sk8 setup` to reconfigure and trust a different server
 
 ## Examples
 

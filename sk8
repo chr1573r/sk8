@@ -1,6 +1,103 @@
 #!/bin/bash
 # sk8 - package manager for rollerblades (https://github.com/chr1573r/rollerblades)
 
+# Interactive setup wizard
+run_setup() {
+  echo "Welcome to sk8 - package manager for rollerblades"
+  echo "=================================================="
+  echo ""
+  echo "No configuration found. Let's set things up!"
+  echo ""
+
+  # Prompt for server URL
+  read -rp "Enter rollerblades server URL: " server_url
+
+  # Validate URL format
+  if [[ -z "$server_url" ]]; then
+    echo "Error: URL cannot be empty."
+    exit 1
+  fi
+
+  # Remove trailing slash if present
+  server_url="${server_url%/}"
+
+  echo ""
+  echo "Connecting to $server_url..."
+
+  # Create temp dir for initial fetch
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  trap "rm -rf '$tmp_dir'" EXIT
+
+  # Try to fetch the public key
+  if ! curl -sSf --connect-timeout 10 "$server_url/rollerblades.pub" -o "$tmp_dir/rollerblades.pub" 2>/dev/null; then
+    echo "Error: Could not connect to server or fetch public key."
+    echo "Make sure the URL is correct and the server is running."
+    exit 1
+  fi
+
+  # Calculate key fingerprint (SHA256 of the public key)
+  local fingerprint
+  fingerprint=$(openssl dgst -sha256 "$tmp_dir/rollerblades.pub" 2>/dev/null | awk '{print $2}')
+
+  if [[ -z "$fingerprint" ]]; then
+    echo "Error: Could not calculate key fingerprint."
+    exit 1
+  fi
+
+  # Try to fetch server info
+  local pkg_count="unknown"
+  if curl -sSf --connect-timeout 5 "$server_url/packages.txt" -o "$tmp_dir/packages.txt" 2>/dev/null; then
+    pkg_count=$(grep -cv '^#' "$tmp_dir/packages.txt" 2>/dev/null || echo "0")
+  fi
+
+  echo ""
+  echo "Server found!"
+  echo ""
+  echo "  URL:         $server_url"
+  echo "  Packages:    $pkg_count available"
+  echo "  Key SHA256:  ${fingerprint:0:16}...${fingerprint: -16}"
+  echo ""
+  echo "The authenticity of this server cannot be established."
+  read -rp "Do you want to trust this server? (yes/no): " trust_response
+
+  if [[ "$trust_response" != "yes" ]]; then
+    echo "Aborted. No changes made."
+    exit 1
+  fi
+
+  # Create directories
+  mkdir -p "$SK8_DIR/cache" "$SK8_DIR/package"
+
+  # Save config
+  echo "SK8_RB_URL=\"$server_url\"" > "$SK8_DIR/config"
+
+  # Copy public key
+  cp "$tmp_dir/rollerblades.pub" "$SK8_DIR/cache/rollerblades.pub"
+
+  # Copy packages.txt if we got it
+  if [[ -f "$tmp_dir/packages.txt" ]]; then
+    cp "$tmp_dir/packages.txt" "$SK8_DIR/cache/packages.txt"
+  fi
+
+  echo ""
+  echo "Setup complete!"
+  echo "  Config saved to: $SK8_DIR/config"
+  echo "  Public key saved to: $SK8_DIR/cache/rollerblades.pub"
+  echo ""
+  echo "You can now use sk8 to install packages:"
+  echo "  sk8 list              # Show available packages"
+  echo "  sk8 install <pkg>     # Install a package"
+  echo ""
+
+  # Set the URL so the rest of the script can use it
+  SK8_RB_URL="$server_url"
+
+  # Clean up trap
+  trap - EXIT
+  rm -rf "$tmp_dir"
+}
+
 # Sanitize package name to prevent path traversal attacks
 sanitize_package_name() {
   local pkg="$1"
@@ -35,47 +132,40 @@ load_config() {
     SK8_DIR="$HOME/.sk8"
   fi
 
-  if ! [[ -d "$SK8_DIR" ]]; then
-    echo "Setup: Initializing sk8 dir '$SK8_DIR'"
-    mkdir -p "$SK8_DIR"
+  # Check if first run (no config exists)
+  if ! [[ -f "$SK8_DIR/config" ]]; then
+    # Run interactive setup if stdin is a terminal, otherwise error
+    if [[ -t 0 ]]; then
+      run_setup
+      return
+    else
+      echo "Error: No config found at $SK8_DIR/config"
+      echo "Run sk8 interactively to set up, or create config manually:"
+      echo "  mkdir -p ~/.sk8"
+      echo "  echo 'SK8_RB_URL=\"https://your-server.com\"' > ~/.sk8/config"
+      exit 1
+    fi
   fi
 
-  if ! [[ -d "$SK8_DIR" ]]; then
-    echo "Error: Cannot access sk8 dir '$SK8_DIR'"
-    exit 1
-  fi
+  # Load existing config
+  source "$SK8_DIR/config"
 
-  if ! [[ -d "$SK8_DIR/cache" ]]; then
-    echo "Setup: Initializing cache dir in '$SK8_DIR'"
-    mkdir -p "$SK8_DIR/cache"
-  fi
-
-  if ! [[ -d "$SK8_DIR/package" ]]; then
-    echo "Setup: Initializing package dir in '$SK8_DIR'"
-    mkdir -p "$SK8_DIR/package"
-  fi
-
-  if [[ -f "$SK8_DIR/config" ]]; then
-    source "$SK8_DIR/config"
-  else
-    echo "Warning: sk8 config could not be loaded, using defaults"
-    # Default values
-    #PATH_FILE="$HOME/.bashrc"
-  fi
+  # Ensure directories exist
+  mkdir -p "$SK8_DIR/cache" "$SK8_DIR/package"
 
   if [[ -z "$SK8_RB_URL" ]]; then
-    echo "Error: Rollerblades url not set. Aborting"
+    echo "Error: SK8_RB_URL not set in $SK8_DIR/config"
     exit 1
   fi
 
+  # Download public key if missing
   if ! [[ -f "$SK8_DIR/cache/rollerblades.pub" ]]; then
-    echo "Setup: Downloading a local copy of rb repo public key..."
+    echo "Downloading server public key..."
     dl rollerblades.pub || {
-    echo "Error: Failed to download repo public key for package verification."
-    exit 1
+      echo "Error: Failed to download repo public key for package verification."
+      exit 1
     }
   fi
-
 } 
 
 # Curl wrapper for any download activity
@@ -283,6 +373,19 @@ list_installed() {
 load_config
 
 case "$1" in
+  setup)
+    # Force re-run setup (remove existing config first)
+    if [[ -f "$SK8_DIR/config" ]]; then
+      echo "Existing configuration found at $SK8_DIR/config"
+      read -rp "Do you want to reconfigure? This will replace your current settings. (yes/no): " confirm
+      if [[ "$confirm" != "yes" ]]; then
+        echo "Aborted."
+        exit 0
+      fi
+      rm -f "$SK8_DIR/config" "$SK8_DIR/cache/rollerblades.pub"
+    fi
+    run_setup
+    ;;
   install)
     install_package "$2"
     ;;
@@ -323,6 +426,7 @@ case "$1" in
     echo "Usage: sk8 <command> [package_name]"
     echo ""
     echo "Commands:"
+    echo "  setup             Configure sk8 (interactive)"
     echo "  install <pkg>     Install a package"
     echo "  remove <pkg>      Remove a package"
     echo "  reinstall <pkg>   Remove and reinstall a package"
