@@ -78,6 +78,13 @@ run_setup() {
     exit 1
   fi
 
+  # Try to fetch MOTD (display as header)
+  if curl -sSf --connect-timeout 5 "$server_url/motd.txt" -o "$tmp_dir/motd.txt" 2>/dev/null; then
+    echo ""
+    sanitize_text "$MAX_MOTD_SIZE" < "$tmp_dir/motd.txt"
+    echo ""
+  fi
+
   # Try to fetch server info
   local pkg_count="unknown"
   if curl -sSf --connect-timeout 5 "$server_url/packages.txt" -o "$tmp_dir/packages.txt" 2>/dev/null; then
@@ -87,25 +94,11 @@ run_setup() {
     pkg_count=$(grep -cv '^#' "$tmp_dir/packages.txt" 2>/dev/null || echo "0")
   fi
 
-  # Try to fetch MOTD
-  local motd=""
-  if curl -sSf --connect-timeout 5 "$server_url/motd.txt" -o "$tmp_dir/motd.txt" 2>/dev/null; then
-    motd=$(sanitize_text "$MAX_MOTD_SIZE" < "$tmp_dir/motd.txt")
-  fi
-
-  echo ""
   echo "Server found!"
   echo ""
   echo "  URL:         $server_url"
   echo "  Packages:    $pkg_count available"
   echo "  Key SHA256:  ${fingerprint:0:16}...${fingerprint: -16}"
-
-  if [[ -n "$motd" ]]; then
-    echo ""
-    echo "  Server message:"
-    echo "$motd" | sed 's/^/    /'
-  fi
-
   echo ""
   echo "The authenticity of this server cannot be established."
   read -rp "Do you want to trust this server? (yes/no): " trust_response
@@ -384,11 +377,11 @@ fetch_index() {
   sanitize_text "$MAX_INDEX_SIZE" < "$SK8_DIR/cache/packages.txt" > "$SK8_DIR/cache/packages.txt.tmp" && \
     mv "$SK8_DIR/cache/packages.txt.tmp" "$SK8_DIR/cache/packages.txt"
 
-  echo "Package index updated."
-
-  # Fetch and display MOTD if available
+  # Fetch and display MOTD as header
   fetch_motd
   show_motd
+
+  echo "Package index updated."
 }
 
 # List available packages from index
@@ -399,9 +392,6 @@ list_available() {
     echo "Package index not found. Run 'sk8 update' first."
     return 1
   fi
-
-  # Show MOTD if available
-  show_motd
 
   echo "Available packages:"
   # Read sanitized content
@@ -490,6 +480,33 @@ case "$1" in
         ;;
     esac
     ;;
+  config)
+    echo "sk8 configuration"
+    echo "================="
+    echo ""
+    echo "  Config file:   $SK8_DIR/config"
+    echo "  Cache dir:     $SK8_DIR/cache"
+    echo "  Package dir:   $SK8_DIR/package"
+    echo "  Server URL:    $SK8_RB_URL"
+    if [[ -f "$SK8_DIR/cache/rollerblades.pub" ]]; then
+      fingerprint=$(openssl dgst -sha256 "$SK8_DIR/cache/rollerblades.pub" 2>/dev/null | awk '{print $2}')
+      echo "  Signing key:   ${fingerprint:0:16}...${fingerprint: -16}"
+    else
+      echo "  Signing key:   (not found)"
+    fi
+    pkg_count=0
+    if [[ -f "$SK8_DIR/cache/packages.txt" ]]; then
+      pkg_count=$(grep -cv '^#' "$SK8_DIR/cache/packages.txt" 2>/dev/null || echo "0")
+    fi
+    installed_count=0
+    if [[ -d "$SK8_DIR/package" ]]; then
+      installed_count=$(find "$SK8_DIR/package" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+    fi
+    echo "  Packages:      $pkg_count available, $installed_count installed"
+    ;;
+  edit)
+    "${EDITOR:-nano}" "$SK8_DIR/config"
+    ;;
   *)
     echo "Usage: sk8 <command> [package_name]"
     echo ""
@@ -502,6 +519,8 @@ case "$1" in
     echo "  upgrade [pkg]     Upgrade all packages or a specific package"
     echo "  list              List available packages"
     echo "  list --installed  List installed packages"
+    echo "  config            Show current configuration"
+    echo "  edit              Open config in \$EDITOR"
     exit 1
     ;;
 esac
