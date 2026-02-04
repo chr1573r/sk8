@@ -108,11 +108,25 @@ run_setup() {
     exit 1
   fi
 
+  # Prompt for bin directory
+  echo ""
+  echo "Where should sk8 create symlinks for package executables?"
+  echo "  (Packages that provide executables will be linked here)"
+  read -rp "Bin directory [$HOME/.local/bin]: " bin_dir_input
+  bin_dir_input="${bin_dir_input:-$HOME/.local/bin}"
+  bin_dir_input="${bin_dir_input%/}"
+
   # Create directories
   mkdir -p "$SK8_DIR/cache" "$SK8_DIR/package"
 
   # Save config
-  echo "SK8_RB_URL=\"$server_url\"" > "$SK8_DIR/config"
+  {
+    echo "SK8_RB_URL=\"$server_url\""
+    echo "SK8_BIN_DIR=\"$bin_dir_input\""
+  } > "$SK8_DIR/config"
+
+  # Set for current session
+  SK8_BIN_DIR="$bin_dir_input"
 
   # Copy public key
   cp "$tmp_dir/rollerblades.pub" "$SK8_DIR/cache/rollerblades.pub"
@@ -166,6 +180,263 @@ sanitize_package_name() {
   fi
 }
 
+# Validate a path from the manifest (no traversal, no absolute, safe chars)
+validate_manifest_path() {
+  local path="$1"
+  if [[ -z "$path" ]]; then
+    echo "Error: Empty path in manifest." >&2
+    return 1
+  fi
+  if [[ "$path" =~ ^/ ]]; then
+    echo "Error: Absolute path not allowed in manifest: $path" >&2
+    return 1
+  fi
+  if [[ "$path" =~ \.\. ]]; then
+    echo "Error: Path traversal not allowed in manifest: $path" >&2
+    return 1
+  fi
+  if ! [[ "$path" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+    echo "Error: Invalid characters in manifest path: $path" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Read and parse sk8.manifest from a package directory
+# Sets MANIFEST_* variables. Returns 1 if no manifest found.
+read_manifest() {
+  local pkg="$1"
+  local manifest="$SK8_DIR/package/$pkg/sk8.manifest"
+
+  # Clear all manifest vars
+  MANIFEST_NAME=""
+  MANIFEST_VERSION=""
+  MANIFEST_DESCRIPTION=""
+  MANIFEST_EXECUTABLE=""
+  MANIFEST_EXTRA_BINARIES=""
+  MANIFEST_SETUP=""
+  MANIFEST_SETUP_ON_UPGRADE=""
+
+  [[ -f "$manifest" ]] || return 1
+
+  local line_count=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    ((line_count++))
+    [[ $line_count -gt 1024 ]] && break
+
+    # Skip comments and empty lines
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+
+    # Split on first '='
+    local key="${line%%=*}"
+    local value="${line#*=}"
+
+    # Trim whitespace from key
+    key="${key// /}"
+
+    case "$key" in
+      NAME)
+        MANIFEST_NAME="${value:0:128}"
+        ;;
+      VERSION)
+        if [[ "$value" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+          MANIFEST_VERSION="${value:0:64}"
+        fi
+        ;;
+      DESCRIPTION)
+        MANIFEST_DESCRIPTION="${value:0:256}"
+        ;;
+      EXECUTABLE)
+        if validate_manifest_path "$value"; then
+          MANIFEST_EXECUTABLE="$value"
+        fi
+        ;;
+      EXTRA_BINARIES)
+        local validated_bins=""
+        for bin_path in $value; do
+          if validate_manifest_path "$bin_path"; then
+            validated_bins="$validated_bins $bin_path"
+          fi
+        done
+        MANIFEST_EXTRA_BINARIES="${validated_bins# }"
+        ;;
+      SETUP)
+        if validate_manifest_path "$value"; then
+          MANIFEST_SETUP="$value"
+        fi
+        ;;
+      SETUP_ON_UPGRADE)
+        if [[ "$value" == "true" || "$value" == "false" ]]; then
+          MANIFEST_SETUP_ON_UPGRADE="$value"
+        fi
+        ;;
+    esac
+  done < <(head -c 65536 "$manifest")
+}
+
+# Check if a binary name conflicts with existing files
+# Returns 0 if no conflict, 1 if conflict exists
+check_bin_conflict() {
+  local binary_name="$1"
+  local pkg="$2"
+  local target="$SK8_BIN_DIR/$binary_name"
+
+  # Check the bin dir directly
+  if [[ -e "$target" || -L "$target" ]]; then
+    if [[ -L "$target" ]]; then
+      local resolved
+      resolved=$(readlink "$target")
+      if [[ "$resolved" == "$SK8_DIR/package/$pkg/"* ]]; then
+        # Our own symlink from a previous install -- safe to overwrite
+        return 0
+      fi
+    fi
+    echo "Warning: '$binary_name' already exists in $SK8_BIN_DIR. Skipping symlink." >&2
+    return 1
+  fi
+
+  # Check PATH for shadowing (soft warning, still allow)
+  local existing
+  existing=$(command -v "$binary_name" 2>/dev/null)
+  if [[ -n "$existing" && "$existing" != "$target" ]]; then
+    echo "Note: '$binary_name' also exists at $existing. Symlink will be created but PATH order determines precedence." >&2
+  fi
+
+  return 0
+}
+
+# Create symlinks for package executables based on manifest
+create_symlinks() {
+  local pkg="$1"
+
+  read_manifest "$pkg" || return 0
+
+  if [[ -z "$MANIFEST_EXECUTABLE" ]]; then
+    return 0
+  fi
+
+  # Ensure bin dir exists
+  if ! mkdir -p "$SK8_BIN_DIR" 2>/dev/null; then
+    echo "Warning: Could not create bin directory $SK8_BIN_DIR. Skipping symlinks." >&2
+    return 0
+  fi
+
+  # Link main executable
+  local src="$SK8_DIR/package/$pkg/$MANIFEST_EXECUTABLE"
+  local bin_name
+  bin_name=$(basename "$MANIFEST_EXECUTABLE")
+
+  if [[ -f "$src" ]]; then
+    chmod +x "$src"
+    if check_bin_conflict "$bin_name" "$pkg"; then
+      ln -sf "$src" "$SK8_BIN_DIR/$bin_name"
+      echo "Linked '$bin_name' -> $src"
+    fi
+  else
+    echo "Warning: Manifest EXECUTABLE '$MANIFEST_EXECUTABLE' not found in package. Skipping symlink." >&2
+  fi
+
+  # Link extra binaries
+  if [[ -n "$MANIFEST_EXTRA_BINARIES" ]]; then
+    for bin_path in $MANIFEST_EXTRA_BINARIES; do
+      src="$SK8_DIR/package/$pkg/$bin_path"
+      bin_name=$(basename "$bin_path")
+
+      if [[ -f "$src" ]]; then
+        chmod +x "$src"
+        if check_bin_conflict "$bin_name" "$pkg"; then
+          ln -sf "$src" "$SK8_BIN_DIR/$bin_name"
+          echo "Linked '$bin_name' -> $src"
+        fi
+      else
+        echo "Warning: Manifest EXTRA_BINARIES '$bin_path' not found in package. Skipping." >&2
+      fi
+    done
+  fi
+}
+
+# Remove symlinks belonging to a package (scans bin dir, no manifest needed)
+remove_symlinks() {
+  local pkg="$1"
+
+  [[ -d "$SK8_BIN_DIR" ]] || return 0
+
+  for link in "$SK8_BIN_DIR"/*; do
+    [[ -L "$link" ]] || continue
+    local resolved
+    resolved=$(readlink "$link")
+    if [[ "$resolved" == "$SK8_DIR/package/$pkg/"* ]]; then
+      rm -f "$link"
+      echo "Removed symlink '$(basename "$link")'"
+    fi
+  done
+}
+
+# Save package version from manifest
+save_version() {
+  local pkg="$1"
+
+  read_manifest "$pkg" || return 0
+
+  if [[ -n "$MANIFEST_VERSION" ]]; then
+    echo "$MANIFEST_VERSION" > "$SK8_DIR/package/$pkg/.sk8_version" 2>/dev/null
+  fi
+}
+
+# Get installed version for a package (prints version or empty string)
+get_version() {
+  local pkg="$1"
+  local version_file="$SK8_DIR/package/$pkg/.sk8_version"
+
+  if [[ -f "$version_file" ]]; then
+    head -1 "$version_file" 2>/dev/null
+  fi
+}
+
+# Run package setup script if defined in manifest
+run_package_setup() {
+  local pkg="$1"
+  local is_upgrade="$2"
+
+  read_manifest "$pkg" || return 0
+
+  if [[ -z "$MANIFEST_SETUP" ]]; then
+    return 0
+  fi
+
+  # Skip on upgrade unless SETUP_ON_UPGRADE is true
+  if [[ "$is_upgrade" == "true" && "$MANIFEST_SETUP_ON_UPGRADE" != "true" ]]; then
+    return 0
+  fi
+
+  local setup_path="$SK8_DIR/package/$pkg/$MANIFEST_SETUP"
+
+  if [[ ! -f "$setup_path" ]]; then
+    echo "Warning: Setup script '$MANIFEST_SETUP' not found in package." >&2
+    return 0
+  fi
+
+  # Non-interactive: skip with info message
+  if [[ ! -t 0 ]]; then
+    echo "Note: Package '$pkg' has a setup wizard. Run 'sk8 setup $pkg' to configure."
+    return 0
+  fi
+
+  read -rp "Package '$pkg' has a setup wizard. Run it now? [y/n]: " answer
+  if [[ "$answer" != "y" && "$answer" != "Y" ]]; then
+    echo "Skipping setup. Run 'sk8 setup $pkg' later to configure."
+    return 0
+  fi
+
+  chmod +x "$setup_path"
+  (cd "$SK8_DIR/package/$pkg" && ./"$MANIFEST_SETUP")
+  local rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo "Warning: Setup script exited with code $rc."
+  fi
+  return $rc
+}
+
 # Clean up cached files for a package
 cleanup_cache() {
   local pkg="$1"
@@ -196,6 +467,11 @@ load_config() {
 
   # Load existing config
   source "$SK8_DIR/config"
+
+  # Set default bin directory if not configured
+  if [[ -z "$SK8_BIN_DIR" ]]; then
+    SK8_BIN_DIR="$HOME/.local/bin"
+  fi
 
   # Ensure directories exist
   mkdir -p "$SK8_DIR/cache" "$SK8_DIR/package"
@@ -278,7 +554,10 @@ install_package() {
   }
 
   cleanup_cache "$package"
+  create_symlinks "$package"
+  save_version "$package"
   echo "'$package' has been installed in '$SK8_DIR/package/$package'"
+  run_package_setup "$package" false
 }
 
 # Function to remove a package
@@ -295,6 +574,7 @@ remove_package() {
   fi
 
   echo "Removing $package..."
+  remove_symlinks "$package"
   rm -rf "${SK8_DIR}/package/${package}" || {
     echo "Error: Failed to remove $package."
     return 1
@@ -318,6 +598,10 @@ upgrade_package() {
 
   echo "Upgrading $package..."
 
+  # Save old version before upgrade
+  local old_version
+  old_version=$(get_version "$package")
+
   dl "$package.tar.gz" || {
     echo "Error: Failed to download package $package."
     return 1
@@ -329,6 +613,9 @@ upgrade_package() {
     return 1
   }
 
+  # Remove old symlinks (paths may change in new version)
+  remove_symlinks "$package"
+
   tar -xz --no-same-owner -C "$SK8_DIR/package/$package" -f "$SK8_DIR/cache/$package.tar.gz" || {
     echo "Error: Failed to extract package $package."
     cleanup_cache "$package"
@@ -336,7 +623,19 @@ upgrade_package() {
   }
 
   cleanup_cache "$package"
-  echo "$package has been upgraded."
+  create_symlinks "$package"
+  save_version "$package"
+
+  local new_version
+  new_version=$(get_version "$package")
+
+  if [[ -n "$old_version" && -n "$new_version" && "$old_version" != "$new_version" ]]; then
+    echo "$package has been upgraded ($old_version -> $new_version)."
+  else
+    echo "$package has been upgraded."
+  fi
+
+  run_package_setup "$package" true
 }
 
 # Upgrade all installed packages
@@ -402,7 +701,13 @@ list_available() {
     # Extra validation: only show valid package names
     if [[ "$pkg" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] && [[ ! "$pkg" =~ \.\. ]]; then
       if [[ -d "$SK8_DIR/package/$pkg" ]]; then
-        echo "  $pkg [installed]"
+        local ver
+        ver=$(get_version "$pkg")
+        if [[ -n "$ver" ]]; then
+          echo "  $pkg [installed: $ver]"
+        else
+          echo "  $pkg [installed]"
+        fi
       else
         echo "  $pkg"
       fi
@@ -422,7 +727,15 @@ list_installed() {
   echo "Installed packages:"
   for pkg_path in "$pkg_dir"/*; do
     if [[ -d "$pkg_path" ]]; then
-      echo "  $(basename "$pkg_path")"
+      local pkg
+      pkg=$(basename "$pkg_path")
+      local ver
+      ver=$(get_version "$pkg")
+      if [[ -n "$ver" ]]; then
+        echo "  $pkg ($ver)"
+      else
+        echo "  $pkg"
+      fi
     fi
   done
 }
@@ -432,17 +745,38 @@ load_config
 
 case "$1" in
   setup)
-    # Force re-run setup (remove existing config first)
-    if [[ -f "$SK8_DIR/config" ]]; then
-      echo "Existing configuration found at $SK8_DIR/config"
-      read -rp "Do you want to reconfigure? This will replace your current settings. (yes/no): " confirm
-      if [[ "$confirm" != "yes" ]]; then
-        echo "Aborted."
-        exit 0
+    if [[ -n "$2" ]]; then
+      # Run package setup script
+      package=$(sanitize_package_name "$2") || exit 1
+      if [[ ! -d "$SK8_DIR/package/$package" ]]; then
+        echo "Package '$package' is not installed."
+        exit 1
       fi
-      rm -f "$SK8_DIR/config" "$SK8_DIR/cache/rollerblades.pub"
+      read_manifest "$package"
+      if [[ -z "$MANIFEST_SETUP" ]]; then
+        echo "Package '$package' does not have a setup script."
+        exit 1
+      fi
+      setup_script="$SK8_DIR/package/$package/$MANIFEST_SETUP"
+      if [[ ! -f "$setup_script" ]]; then
+        echo "Error: Setup script not found: $MANIFEST_SETUP"
+        exit 1
+      fi
+      chmod +x "$setup_script"
+      (cd "$SK8_DIR/package/$package" && ./"$MANIFEST_SETUP")
+    else
+      # Force re-run setup (remove existing config first)
+      if [[ -f "$SK8_DIR/config" ]]; then
+        echo "Existing configuration found at $SK8_DIR/config"
+        read -rp "Do you want to reconfigure? This will replace your current settings. (yes/no): " confirm
+        if [[ "$confirm" != "yes" ]]; then
+          echo "Aborted."
+          exit 0
+        fi
+        rm -f "$SK8_DIR/config" "$SK8_DIR/cache/rollerblades.pub"
+      fi
+      run_setup
     fi
-    run_setup
     ;;
   install)
     install_package "$2"
@@ -488,6 +822,7 @@ case "$1" in
     echo "  Cache dir:     $SK8_DIR/cache"
     echo "  Package dir:   $SK8_DIR/package"
     echo "  Server URL:    $SK8_RB_URL"
+    echo "  Bin dir:       $SK8_BIN_DIR"
     if [[ -f "$SK8_DIR/cache/rollerblades.pub" ]]; then
       fingerprint=$(openssl dgst -sha256 "$SK8_DIR/cache/rollerblades.pub" 2>/dev/null | awk '{print $2}')
       echo "  Signing key:   ${fingerprint:0:16}...${fingerprint: -16}"
@@ -512,6 +847,7 @@ case "$1" in
     echo ""
     echo "Commands:"
     echo "  setup             Configure sk8 (interactive)"
+    echo "  setup <pkg>       Run package setup wizard"
     echo "  install <pkg>     Install a package"
     echo "  remove <pkg>      Remove a package"
     echo "  reinstall <pkg>   Remove and reinstall a package"
