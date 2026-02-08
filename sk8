@@ -60,6 +60,7 @@ run_setup() {
   # Create temp dir for initial fetch
   local tmp_dir
   tmp_dir=$(mktemp -d)
+  # shellcheck disable=SC2064  # Intentional: expand $tmp_dir now, not at signal time
   trap "rm -rf '$tmp_dir'" EXIT
 
   # Try to fetch the public key
@@ -159,6 +160,57 @@ run_setup() {
   rm -rf "$tmp_dir"
 }
 
+# Non-interactive setup when SK8_RB_URL env var is set
+auto_setup_from_env() {
+  local server_url="${SK8_RB_URL%/}"
+
+  echo "sk8: Auto-configuring from SK8_RB_URL environment variable..."
+  echo ""
+
+  # Create directories
+  mkdir -p "$SK8_DIR/cache" "$SK8_DIR/package"
+
+  # Download public key
+  if ! curl -sSf --connect-timeout 10 "$server_url/rollerblades.pub" -o "$SK8_DIR/cache/rollerblades.pub" 2>/dev/null; then
+    echo "Error: Could not fetch public key from $server_url/rollerblades.pub" >&2
+    echo "Check that the server URL is correct and the server is running." >&2
+    exit 1
+  fi
+
+  # Calculate and display fingerprint
+  local fingerprint
+  fingerprint=$(openssl dgst -sha256 "$SK8_DIR/cache/rollerblades.pub" 2>/dev/null | awk '{print $2}')
+
+  echo "=========================================="
+  echo "  WARNING: Auto-trusting server"
+  echo ""
+  echo "  Server:      $server_url"
+  echo "  Key SHA256:  $fingerprint"
+  echo ""
+  echo "  The server's public key has been trusted"
+  echo "  automatically via SK8_RB_URL env var."
+  echo "  Verify this fingerprint with your server"
+  echo "  administrator."
+  echo "=========================================="
+  echo ""
+
+  # Set default bin dir
+  SK8_BIN_DIR="${SK8_BIN_DIR:-$HOME/.local/bin}"
+
+  # Save config
+  {
+    echo "SK8_RB_URL=\"$server_url\""
+    echo "SK8_BIN_DIR=\"$SK8_BIN_DIR\""
+  } > "$SK8_DIR/config"
+
+  # Fetch MOTD and index silently
+  fetch_motd
+  curl -sSf --connect-timeout 5 --max-time 10 "$server_url/packages.txt" 2>/dev/null | \
+    sanitize_text "$MAX_INDEX_SIZE" > "$SK8_DIR/cache/packages.txt" || true
+
+  echo "Config saved to $SK8_DIR/config"
+}
+
 # Sanitize package name to prevent path traversal attacks
 sanitize_package_name() {
   local pkg="$1"
@@ -203,7 +255,8 @@ validate_manifest_path() {
 }
 
 # Read and parse sk8.manifest from a package directory
-# Sets MANIFEST_* variables. Returns 1 if no manifest found.
+# Sets MANIFEST_* variables for callers. Returns 1 if no manifest found.
+# shellcheck disable=SC2034  # MANIFEST_* vars are used by callers
 read_manifest() {
   local pkg="$1"
   local manifest="$SK8_DIR/package/$pkg/sk8.manifest"
@@ -452,15 +505,22 @@ load_config() {
 
   # Check if first run (no config exists)
   if ! [[ -f "$SK8_DIR/config" ]]; then
+    # Auto-setup if SK8_RB_URL env var is set
+    if [[ -n "$SK8_RB_URL" ]]; then
+      auto_setup_from_env
+      return
+    fi
+
     # Run interactive setup if stdin is a terminal, otherwise error
     if [[ -t 0 ]]; then
       run_setup
       return
     else
-      echo "Error: No config found at $SK8_DIR/config"
-      echo "Run sk8 interactively to set up, or create config manually:"
-      echo "  mkdir -p ~/.sk8"
-      echo "  echo 'SK8_RB_URL=\"https://your-server.com\"' > ~/.sk8/config"
+      echo "Error: No config found at $SK8_DIR/config" >&2
+      echo "Set SK8_RB_URL environment variable for auto-setup:" >&2
+      echo "  SK8_RB_URL=https://your-server.com sk8 list" >&2
+      echo "" >&2
+      echo "Or run sk8 interactively to set up." >&2
       exit 1
     fi
   fi
@@ -477,7 +537,7 @@ load_config() {
   mkdir -p "$SK8_DIR/cache" "$SK8_DIR/package"
 
   if [[ -z "$SK8_RB_URL" ]]; then
-    echo "Error: SK8_RB_URL not set in $SK8_DIR/config"
+    echo "Error: SK8_RB_URL not set in $SK8_DIR/config" >&2
     exit 1
   fi
 
@@ -493,10 +553,10 @@ load_config() {
 
 # Curl wrapper for any download activity
 dl(){
-  echo "Downloading '$1'"
+  echo "Downloading '$1'" >&2
 
   curl -sSf --connect-timeout 30 --max-time 300 "${SK8_RB_URL}/$1" -o "$SK8_DIR/cache/$1" || {
-    echo "Error: Failed to download '${SK8_RB_URL}/$1'"
+    echo "Error: Failed to download '${SK8_RB_URL}/$1'" >&2
     rm -f "$SK8_DIR/cache/$1"
     return 1
   }
@@ -529,6 +589,12 @@ install_package() {
   if [[ -d "$SK8_DIR/package/$package" ]]; then
     echo "Package '$package' is already installed."
     return 0
+  fi
+
+  # Auto-fetch index if not yet downloaded
+  if [[ ! -f "$SK8_DIR/cache/packages.txt" ]]; then
+    echo "Package index not found. Fetching from server..."
+    fetch_index || echo "Warning: Could not fetch package index. Continuing with install..." >&2
   fi
 
   echo "Installing $package..."
@@ -688,8 +754,11 @@ list_available() {
   local index="$SK8_DIR/cache/packages.txt"
 
   if [[ ! -f "$index" ]]; then
-    echo "Package index not found. Run 'sk8 update' first."
-    return 1
+    echo "Package index not found. Fetching from server..."
+    fetch_index || {
+      echo "Error: Could not fetch package index." >&2
+      return 1
+    }
   fi
 
   echo "Available packages:"
