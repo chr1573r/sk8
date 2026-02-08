@@ -1,208 +1,526 @@
 #!/bin/bash
 # sk8 - package manager for rollerblades (https://github.com/chr1573r/rollerblades)
 
+# Maximum sizes for server-provided content (security limits)
+MAX_MOTD_SIZE=4096
+MAX_INDEX_SIZE=65536
 
+# Sanitize text from server to prevent terminal escape attacks
+# Removes ANSI sequences, limits length
+sanitize_text() {
+  local max_len="${1:-4096}"
+  # Remove ANSI escape sequences, then truncate to max length
+  # Using perl-style escape removal that works across platforms
+  sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b[^[]*//g' | head -c "$max_len"
+}
+
+# Display MOTD from server (if available)
+show_motd() {
+  local motd_file="$SK8_DIR/cache/motd.txt"
+  if [[ -f "$motd_file" ]]; then
+    echo ""
+    echo "--- Server Message ---"
+    sanitize_text "$MAX_MOTD_SIZE" < "$motd_file"
+    echo ""
+    echo "----------------------"
+  fi
+}
+
+# Fetch MOTD from server (optional, don't fail if missing)
+fetch_motd() {
+  curl -sSf --connect-timeout 5 --max-time 10 "${SK8_RB_URL}/motd.txt" 2>/dev/null | \
+    sanitize_text "$MAX_MOTD_SIZE" > "$SK8_DIR/cache/motd.txt.tmp" && \
+    mv "$SK8_DIR/cache/motd.txt.tmp" "$SK8_DIR/cache/motd.txt" || \
+    rm -f "$SK8_DIR/cache/motd.txt.tmp" "$SK8_DIR/cache/motd.txt"
+}
+
+# Interactive setup wizard
+run_setup() {
+  echo "Welcome to sk8 - package manager for rollerblades"
+  echo "=================================================="
+  echo ""
+  echo "No configuration found. Let's set things up!"
+  echo ""
+
+  # Prompt for server URL
+  read -rp "Enter rollerblades server URL: " server_url
+
+  # Validate URL format
+  if [[ -z "$server_url" ]]; then
+    echo "Error: URL cannot be empty."
+    exit 1
+  fi
+
+  # Remove trailing slash if present
+  server_url="${server_url%/}"
+
+  echo ""
+  echo "Connecting to $server_url..."
+
+  # Create temp dir for initial fetch
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  trap "rm -rf '$tmp_dir'" EXIT
+
+  # Try to fetch the public key
+  if ! curl -sSf --connect-timeout 10 "$server_url/rollerblades.pub" -o "$tmp_dir/rollerblades.pub" 2>/dev/null; then
+    echo "Error: Could not connect to server or fetch public key."
+    echo "Make sure the URL is correct and the server is running."
+    exit 1
+  fi
+
+  # Calculate key fingerprint (SHA256 of the public key)
+  local fingerprint
+  fingerprint=$(openssl dgst -sha256 "$tmp_dir/rollerblades.pub" 2>/dev/null | awk '{print $2}')
+
+  if [[ -z "$fingerprint" ]]; then
+    echo "Error: Could not calculate key fingerprint."
+    exit 1
+  fi
+
+  # Try to fetch MOTD (display as header)
+  if curl -sSf --connect-timeout 5 "$server_url/motd.txt" -o "$tmp_dir/motd.txt" 2>/dev/null; then
+    echo ""
+    sanitize_text "$MAX_MOTD_SIZE" < "$tmp_dir/motd.txt"
+    echo ""
+  fi
+
+  # Try to fetch server info
+  local pkg_count="unknown"
+  if curl -sSf --connect-timeout 5 "$server_url/packages.txt" -o "$tmp_dir/packages.txt" 2>/dev/null; then
+    # Sanitize before counting
+    sanitize_text "$MAX_INDEX_SIZE" < "$tmp_dir/packages.txt" > "$tmp_dir/packages.txt.clean"
+    mv "$tmp_dir/packages.txt.clean" "$tmp_dir/packages.txt"
+    pkg_count=$(grep -cv '^#' "$tmp_dir/packages.txt" 2>/dev/null || echo "0")
+  fi
+
+  echo "Server found!"
+  echo ""
+  echo "  URL:         $server_url"
+  echo "  Packages:    $pkg_count available"
+  echo "  Key SHA256:  ${fingerprint:0:16}...${fingerprint: -16}"
+  echo ""
+  echo "The authenticity of this server cannot be established."
+  read -rp "Do you want to trust this server? (yes/no): " trust_response
+
+  if [[ "$trust_response" != "yes" ]]; then
+    echo "Aborted. No changes made."
+    exit 1
+  fi
+
+  # Create directories
+  mkdir -p "$SK8_DIR/cache" "$SK8_DIR/package"
+
+  # Save config
+  echo "SK8_RB_URL=\"$server_url\"" > "$SK8_DIR/config"
+
+  # Copy public key
+  cp "$tmp_dir/rollerblades.pub" "$SK8_DIR/cache/rollerblades.pub"
+
+  # Copy packages.txt if we got it
+  if [[ -f "$tmp_dir/packages.txt" ]]; then
+    cp "$tmp_dir/packages.txt" "$SK8_DIR/cache/packages.txt"
+  fi
+
+  # Copy motd.txt if we got it
+  if [[ -f "$tmp_dir/motd.txt" ]]; then
+    cp "$tmp_dir/motd.txt" "$SK8_DIR/cache/motd.txt"
+  fi
+
+  echo ""
+  echo "Setup complete!"
+  echo "  Config saved to: $SK8_DIR/config"
+  echo "  Public key saved to: $SK8_DIR/cache/rollerblades.pub"
+  echo ""
+  echo "You can now use sk8 to install packages:"
+  echo "  sk8 list              # Show available packages"
+  echo "  sk8 install <pkg>     # Install a package"
+  echo ""
+
+  # Set the URL so the rest of the script can use it
+  SK8_RB_URL="$server_url"
+
+  # Clean up trap
+  trap - EXIT
+  rm -rf "$tmp_dir"
+}
+
+# Sanitize package name to prevent path traversal attacks
+sanitize_package_name() {
+  local pkg="$1"
+
+  # Reject empty package names
+  if [[ -z "$pkg" ]]; then
+    echo "Error: Package name cannot be empty." >&2
+    return 1
+  fi
+
+  # Only allow alphanumeric, dash, underscore, and dot (not at start)
+  # Reject any path traversal attempts
+  if [[ "$pkg" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] && [[ ! "$pkg" =~ \.\. ]]; then
+    echo "$pkg"
+    return 0
+  else
+    echo "Error: Invalid package name '$pkg'. Names must start with alphanumeric and contain only alphanumeric, dash, underscore, or dot." >&2
+    return 1
+  fi
+}
+
+# Clean up cached files for a package
+cleanup_cache() {
+  local pkg="$1"
+  rm -f "$SK8_DIR/cache/${pkg}.tar.gz" "$SK8_DIR/cache/${pkg}.signature"
+}
 
 # Function to load configuration from file or set default values
 load_config() {
 
   if [[ -z "$SK8_DIR" ]]; then
-      SK8_DIR="$HOME/.sk8"
+    SK8_DIR="$HOME/.sk8"
   fi
 
-  if ! [[ -d "$SK8_DIR" ]]; then
-    echo "Setup: Initializing sk8 dir '$SK8_DIR'"
-    mkdir "$SK8_DIR"
+  # Check if first run (no config exists)
+  if ! [[ -f "$SK8_DIR/config" ]]; then
+    # Run interactive setup if stdin is a terminal, otherwise error
+    if [[ -t 0 ]]; then
+      run_setup
+      return
+    else
+      echo "Error: No config found at $SK8_DIR/config"
+      echo "Run sk8 interactively to set up, or create config manually:"
+      echo "  mkdir -p ~/.sk8"
+      echo "  echo 'SK8_RB_URL=\"https://your-server.com\"' > ~/.sk8/config"
+      exit 1
+    fi
   fi
 
-  if ! [[ -d "$SK8_DIR" ]]; then
-    echo "Error: Cannot access sk8 dir '$SK8_DIR'"
-    exit 1
-  fi
+  # Load existing config
+  source "$SK8_DIR/config"
 
-  if ! [[ -d "$SK8_DIR/cache" ]]; then
-    echo "Setup: Initializing cache dir in '$SK8_DIR'"
-    mkdir "$SK8_DIR/cache"
-  fi
-
-
-  if ! [[ -d "$SK8_DIR/package" ]]; then
-    echo "Setup: Initializing package dir in '$SK8_DIR'"
-    mkdir "$SK8_DIR/package"
-  fi
-
-  if [[ -f "$SK8_DIR/config" ]]; then
-    source "$SK8_DIR/config"
-  else
-    echo "Warning: sk8 config could not be loaded, using defaults"
-    # Default values
-    #PATH_FILE="$HOME/.bashrc"
-  fi
+  # Ensure directories exist
+  mkdir -p "$SK8_DIR/cache" "$SK8_DIR/package"
 
   if [[ -z "$SK8_RB_URL" ]]; then
-    echo "Error: Rollerblades url not set. Aborting"
+    echo "Error: SK8_RB_URL not set in $SK8_DIR/config"
     exit 1
   fi
 
+  # Download public key if missing
   if ! [[ -f "$SK8_DIR/cache/rollerblades.pub" ]]; then
-    echo "Setup: Downloading a local copy of rb repo public key..."
+    echo "Downloading server public key..."
     dl rollerblades.pub || {
-    echo "Error: Failed to download repo public key for package verification."
-    exit 1
+      echo "Error: Failed to download repo public key for package verification."
+      exit 1
     }
   fi
-
 } 
 
 # Curl wrapper for any download activity
 dl(){
-
   echo "Downloading '$1'"
 
-  curl -s "${SK8_RB_URL}/$1" -o "$SK8_DIR/cache/$1" || {
+  curl -sSf --connect-timeout 30 --max-time 300 "${SK8_RB_URL}/$1" -o "$SK8_DIR/cache/$1" || {
     echo "Error: Failed to download '${SK8_RB_URL}/$1'"
+    rm -f "$SK8_DIR/cache/$1"
     return 1
   }
-
 }
 
 # Function to verify package integrity
 verify_package() {
-  package="$1"
+  local package="$1"
 
-  # Verify package signature
   echo "Verifying package $package..."
   dl "$package.signature" || {
     echo "Error: Failed to download package signature for $package."
     return 1
   }
 
-  openssl dgst -verify "$SK8_DIR/cache/rollerblades.pub" -signature "$SK8_DIR/cache/$package.signature" "$SK8_DIR/cache/$package.tar.gz" >/dev/null 2>&1 || {
+  # Verify signature using SHA256 (matching rollerblades signing algorithm)
+  if openssl dgst -sha256 -verify "$SK8_DIR/cache/rollerblades.pub" -signature "$SK8_DIR/cache/$package.signature" "$SK8_DIR/cache/$package.tar.gz" >/dev/null; then
+    echo "Package $package verified successfully."
+    return 0
+  else
     echo "Error: Package $package signature verification failed."
     return 1
-  }
-
-  echo "Package $package has been verified."
+  fi
 }
 
 # Function to install a package
 install_package() {
-  package="$1"
-  url="${SK8_RB_URL}/$package.tar.gz"
+  package=$(sanitize_package_name "$1") || return 1
 
   if [[ -d "$SK8_DIR/package/$package" ]]; then
     echo "Package '$package' is already installed."
-    return
+    return 0
   fi
 
   echo "Installing $package..."
   mkdir -p "$SK8_DIR/package/$package"
   dl "$package.tar.gz" || {
     echo "Error: Failed to download package '$package'."
+    rm -rf "$SK8_DIR/package/$package"
     return 1
   }
 
   verify_package "$package" || {
     echo "Error: Failed to verify package '$package'."
+    cleanup_cache "$package"
+    rm -rf "$SK8_DIR/package/$package"
     return 1
   }
 
-  tar -xvz -C "$SK8_DIR/package/$package" -f "$SK8_DIR/cache/$package.tar.gz" || {
+  tar -xz --no-same-owner -C "$SK8_DIR/package/$package" -f "$SK8_DIR/cache/$package.tar.gz" || {
     echo "Error: Failed to extract package '$package'."
+    cleanup_cache "$package"
+    rm -rf "$SK8_DIR/package/$package"
     return 1
   }
 
-  # Add package executables to the user's path
-  #echo "export PATH=\"$SK8_DIR/package/$package:\$PATH\"" >> "$PATH_FILE"
-  #source "$PATH_FILE"
-
+  cleanup_cache "$package"
   echo "'$package' has been installed in '$SK8_DIR/package/$package'"
 }
 
 # Function to remove a package
 remove_package() {
-  if [[ "$1" == "" ]]; then 
+  if [[ -z "$1" ]]; then
     echo "Error: No package specified."
     return 1
   fi
-  package="$1"
+  package=$(sanitize_package_name "$1") || return 1
 
   if [[ ! -d "$SK8_DIR/package/$package" ]]; then
     echo "Package $package is not installed."
-    return
+    return 1
   fi
 
   echo "Removing $package..."
-  rm -r "${SK8_DIR}/package/${package}" || {
+  rm -rf "${SK8_DIR}/package/${package}" || {
     echo "Error: Failed to remove $package."
     return 1
   }
 
-  # Remove package executables from the user's path
-  #sed -i "/$package/d" "$PATH_FILE"
-  #source "$PATH_FILE"
-
   echo "$package has been removed."
 }
 
-# Function to update a package
-update_package() {
-  if [[ "$1" == "" ]]; then 
+# Function to upgrade a package
+upgrade_package() {
+  if [[ -z "$1" ]]; then
     echo "Error: No package specified."
     return 1
   fi
-  package="$1"
-  url="${SK8_RB_URL}/$package.tar.gz"
+  package=$(sanitize_package_name "$1") || return 1
 
   if [[ ! -d "$SK8_DIR/package/$package" ]]; then
     echo "Package $package is not installed."
-    return
+    return 1
   fi
 
-  echo "Updating $package..."
+  echo "Upgrading $package..."
 
-    dl "$package.tar.gz" || {
+  dl "$package.tar.gz" || {
     echo "Error: Failed to download package $package."
     return 1
   }
 
   verify_package "$package" || {
     echo "Error: Failed to verify package $package."
+    cleanup_cache "$package"
     return 1
   }
 
-  #rm -r "${SK8_DIR}/${package}" || {
-  #  echo "Error: Failed to update $package."
-  #  return 1
-  #}
-
-  tar -xvz -C "$SK8_DIR/package/$package" -f "$SK8_DIR/cache/$package.tar.gz" || {
+  tar -xz --no-same-owner -C "$SK8_DIR/package/$package" -f "$SK8_DIR/cache/$package.tar.gz" || {
     echo "Error: Failed to extract package $package."
+    cleanup_cache "$package"
     return 1
   }
 
-  echo "$package has been updated."
+  cleanup_cache "$package"
+  echo "$package has been upgraded."
+}
+
+# Upgrade all installed packages
+upgrade_all() {
+  local pkg_dir="$SK8_DIR/package"
+  local upgraded=0
+  local failed=0
+
+  if [[ ! -d "$pkg_dir" ]] || [[ -z "$(ls -A "$pkg_dir" 2>/dev/null)" ]]; then
+    echo "No packages installed."
+    return 0
+  fi
+
+  echo "Upgrading all installed packages..."
+  for pkg_path in "$pkg_dir"/*; do
+    if [[ -d "$pkg_path" ]]; then
+      local pkg
+      pkg=$(basename "$pkg_path")
+      if upgrade_package "$pkg"; then
+        ((upgraded++))
+      else
+        ((failed++))
+      fi
+    fi
+  done
+
+  echo "Upgrade complete: $upgraded succeeded, $failed failed."
+}
+
+# Fetch package index from server
+fetch_index() {
+  echo "Fetching package index..."
+  dl "packages.txt" || {
+    echo "Error: Failed to fetch package index."
+    return 1
+  }
+  # Sanitize the downloaded index
+  sanitize_text "$MAX_INDEX_SIZE" < "$SK8_DIR/cache/packages.txt" > "$SK8_DIR/cache/packages.txt.tmp" && \
+    mv "$SK8_DIR/cache/packages.txt.tmp" "$SK8_DIR/cache/packages.txt"
+
+  # Fetch and display MOTD as header
+  fetch_motd
+  show_motd
+
+  echo "Package index updated."
+}
+
+# List available packages from index
+list_available() {
+  local index="$SK8_DIR/cache/packages.txt"
+
+  if [[ ! -f "$index" ]]; then
+    echo "Package index not found. Run 'sk8 update' first."
+    return 1
+  fi
+
+  echo "Available packages:"
+  # Read sanitized content
+  while IFS= read -r pkg; do
+    # Skip empty lines and comments
+    [[ -z "$pkg" || "$pkg" =~ ^# ]] && continue
+
+    # Extra validation: only show valid package names
+    if [[ "$pkg" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] && [[ ! "$pkg" =~ \.\. ]]; then
+      if [[ -d "$SK8_DIR/package/$pkg" ]]; then
+        echo "  $pkg [installed]"
+      else
+        echo "  $pkg"
+      fi
+    fi
+  done < <(sanitize_text "$MAX_INDEX_SIZE" < "$index")
+}
+
+# List installed packages
+list_installed() {
+  local pkg_dir="$SK8_DIR/package"
+
+  if [[ ! -d "$pkg_dir" ]] || [[ -z "$(ls -A "$pkg_dir" 2>/dev/null)" ]]; then
+    echo "No packages installed."
+    return 0
+  fi
+
+  echo "Installed packages:"
+  for pkg_path in "$pkg_dir"/*; do
+    if [[ -d "$pkg_path" ]]; then
+      echo "  $(basename "$pkg_path")"
+    fi
+  done
 }
 
 # Main script
 load_config
 
 case "$1" in
+  setup)
+    # Force re-run setup (remove existing config first)
+    if [[ -f "$SK8_DIR/config" ]]; then
+      echo "Existing configuration found at $SK8_DIR/config"
+      read -rp "Do you want to reconfigure? This will replace your current settings. (yes/no): " confirm
+      if [[ "$confirm" != "yes" ]]; then
+        echo "Aborted."
+        exit 0
+      fi
+      rm -f "$SK8_DIR/config" "$SK8_DIR/cache/rollerblades.pub"
+    fi
+    run_setup
+    ;;
   install)
     install_package "$2"
     ;;
-  remove)
+  remove|uninstall)
     remove_package "$2"
     ;;
   update)
-    update_package "$2"
+    # apt-style: update refreshes the package index
+    fetch_index
+    ;;
+  upgrade)
+    # apt-style: upgrade updates packages
+    if [[ -n "$2" ]]; then
+      upgrade_package "$2"
+    else
+      upgrade_all
+    fi
     ;;
   reinstall|force-install|re-install)
     remove_package "$2"
     install_package "$2"
     ;;
+  list)
+    case "$2" in
+      --installed|-i)
+        list_installed
+        ;;
+      "")
+        list_available
+        ;;
+      *)
+        echo "Usage: sk8 list [--installed]"
+        exit 1
+        ;;
+    esac
+    ;;
+  config)
+    echo "sk8 configuration"
+    echo "================="
+    echo ""
+    echo "  Config file:   $SK8_DIR/config"
+    echo "  Cache dir:     $SK8_DIR/cache"
+    echo "  Package dir:   $SK8_DIR/package"
+    echo "  Server URL:    $SK8_RB_URL"
+    if [[ -f "$SK8_DIR/cache/rollerblades.pub" ]]; then
+      fingerprint=$(openssl dgst -sha256 "$SK8_DIR/cache/rollerblades.pub" 2>/dev/null | awk '{print $2}')
+      echo "  Signing key:   ${fingerprint:0:16}...${fingerprint: -16}"
+    else
+      echo "  Signing key:   (not found)"
+    fi
+    pkg_count=0
+    if [[ -f "$SK8_DIR/cache/packages.txt" ]]; then
+      pkg_count=$(grep -cv '^#' "$SK8_DIR/cache/packages.txt" 2>/dev/null || echo "0")
+    fi
+    installed_count=0
+    if [[ -d "$SK8_DIR/package" ]]; then
+      installed_count=$(find "$SK8_DIR/package" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+    fi
+    echo "  Packages:      $pkg_count available, $installed_count installed"
+    ;;
+  edit)
+    "${EDITOR:-nano}" "$SK8_DIR/config"
+    ;;
   *)
-    echo "Usage: $0 [install|reinstall|remove|update] package_name"
+    echo "Usage: sk8 <command> [package_name]"
+    echo ""
+    echo "Commands:"
+    echo "  setup             Configure sk8 (interactive)"
+    echo "  install <pkg>     Install a package"
+    echo "  remove <pkg>      Remove a package"
+    echo "  reinstall <pkg>   Remove and reinstall a package"
+    echo "  update            Fetch latest package index"
+    echo "  upgrade [pkg]     Upgrade all packages or a specific package"
+    echo "  list              List available packages"
+    echo "  list --installed  List installed packages"
+    echo "  config            Show current configuration"
+    echo "  edit              Open config in \$EDITOR"
     exit 1
     ;;
 esac
