@@ -2,6 +2,20 @@
 
 A lightweight package manager for [rollerblades](https://github.com/chr1573r/rollerblades).
 
+## Installation
+
+One-liner install:
+
+```bash
+curl -sSf https://raw.githubusercontent.com/chr1573r/sk8/main/install.sh | sh
+```
+
+Or install to a custom directory:
+
+```bash
+curl -sSf https://raw.githubusercontent.com/chr1573r/sk8/main/install.sh | sh -s -- /usr/local/bin
+```
+
 ## Features
 
 - Install, update, and remove packages from a rollerblades server
@@ -12,34 +26,28 @@ A lightweight package manager for [rollerblades](https://github.com/chr1573r/rol
 - Package manifest support (`sk8.manifest`) for executable linking and setup scripts
 - Automatic symlinking of package executables with conflict detection
 - Version tracking for installed packages
+- Non-interactive setup via environment variables
 
 ## Quick Start
 
-Just run sk8 - it will guide you through setup:
+### Interactive setup
 
 ```bash
-$ sk8
-
-Welcome to sk8 - package manager for rollerblades
-==================================================
-
-No configuration found. Let's set things up!
-
-Enter rollerblades server URL: https://packages.example.com
-
-Connecting to https://packages.example.com...
-
-Server found!
-
-  URL:         https://packages.example.com
-  Packages:    5 available
-  Key SHA256:  a1b2c3d4e5f6g7h8...i9j0k1l2m3n4o5p6
-
-The authenticity of this server cannot be established.
-Do you want to trust this server? (yes/no): yes
-
-Setup complete!
+sk8
+# Follow the prompts to enter your server URL and trust the key
 ```
+
+### Non-interactive setup (CI/scripting)
+
+```bash
+# Auto-configure with server URL from environment variable
+SK8_RB_URL=https://packages.example.com sk8 list
+```
+
+When `SK8_RB_URL` is set and no config exists, sk8 will:
+- Download and trust the server's public key automatically
+- Display a warning with the key fingerprint for verification
+- Save the configuration for future use
 
 Then use sk8 normally:
 
@@ -81,7 +89,7 @@ SK8_BIN_DIR="/home/user/.local/bin"
 | Variable | Description |
 |----------|-------------|
 | `SK8_DIR` | Override sk8 directory (default: `~/.sk8`) |
-| `SK8_RB_URL` | Rollerblades server URL |
+| `SK8_RB_URL` | Rollerblades server URL. If set when no config exists, triggers auto-setup. |
 | `SK8_BIN_DIR` | Directory for executable symlinks (default: `~/.local/bin`) |
 
 ## Directory Structure
@@ -156,6 +164,7 @@ When a manifest includes `VERSION`, sk8 tracks the installed version:
 ## Security
 
 - **Trust on first use**: On first run, sk8 shows the server's key fingerprint and asks you to verify
+- **Auto-setup trust**: When using `SK8_RB_URL` env var, the key is trusted automatically with a prominent fingerprint warning. Verify the fingerprint with your server administrator.
 - All packages are verified against the server's public key (SHA256)
 - Package names are sanitized to prevent path traversal attacks
 - Failed verifications automatically clean up cached files
@@ -170,7 +179,7 @@ When a manifest includes `VERSION`, sk8 tracks the installed version:
 
 If the rollerblades server provides a `motd.txt`, sk8 will display it:
 - During setup (shows server's welcome message)
-- When running `sk8 update` or `sk8 list`
+- When running `sk8 update`
 
 All server-provided content is sanitized (ANSI escapes removed, length limited) for security.
 
@@ -179,8 +188,7 @@ All server-provided content is sanitized (ANSI escapes removed, length limited) 
 ### Install and use a package
 
 ```bash
-# Update index and install
-sk8 update
+# Install directly (index is fetched automatically if needed)
 sk8 install my-script
 
 # If the package has a sk8.manifest with EXECUTABLE,
@@ -191,23 +199,23 @@ sk8 install my-script
 ### Keep packages updated
 
 ```bash
-# Check for updates and upgrade all
 sk8 update
 sk8 upgrade
+```
+
+### Bootstrap in a script
+
+```bash
+# Non-interactive: set URL and install in one go
+export SK8_RB_URL=https://packages.example.com
+sk8 install my-tool
+sk8 install another-tool
 ```
 
 ### View what's installed
 
 ```bash
 sk8 list --installed
-```
-
-### View available packages
-
-```bash
-sk8 update
-sk8 list
-# Shows: package-name [installed] for installed packages
 ```
 
 ## Server Setup
