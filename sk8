@@ -11,16 +11,16 @@ sanitize_text() {
   local max_len="${1:-4096}"
   # Remove ANSI escape sequences, then truncate to max length
   # Using perl-style escape removal that works across platforms
-  sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b[^[]*//g' | head -c "$max_len"
+  sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b[^[]*//g' | head -c "${max_len}"
 }
 
 # Display MOTD from server (if available)
 show_motd() {
-  local motd_file="$SK8_DIR/cache/motd.txt"
-  if [[ -f "$motd_file" ]]; then
+  local motd_file="${SK8_DIR}/cache/motd.txt"
+  if [[ -f "${motd_file}" ]]; then
     echo ""
     echo "--- Server Message ---"
-    sanitize_text "$MAX_MOTD_SIZE" < "$motd_file"
+    sanitize_text "${MAX_MOTD_SIZE}" < "${motd_file}"
     echo ""
     echo "----------------------"
   fi
@@ -28,10 +28,26 @@ show_motd() {
 
 # Fetch MOTD from server (optional, don't fail if missing)
 fetch_motd() {
-  curl -sSf --connect-timeout 5 --max-time 10 "${SK8_RB_URL}/motd.txt" 2>/dev/null | \
-    sanitize_text "$MAX_MOTD_SIZE" > "$SK8_DIR/cache/motd.txt.tmp" && \
-    mv "$SK8_DIR/cache/motd.txt.tmp" "$SK8_DIR/cache/motd.txt" || \
-    rm -f "$SK8_DIR/cache/motd.txt.tmp" "$SK8_DIR/cache/motd.txt"
+  if curl -sSf --connect-timeout 5 --max-time 10 "${SK8_RB_URL}/motd.txt" 2>/dev/null | \
+      sanitize_text "${MAX_MOTD_SIZE}" > "${SK8_DIR}/cache/motd.txt.tmp"; then
+    mv "${SK8_DIR}/cache/motd.txt.tmp" "${SK8_DIR}/cache/motd.txt"
+  else
+    rm -f "${SK8_DIR}/cache/motd.txt.tmp" "${SK8_DIR}/cache/motd.txt"
+  fi
+}
+
+# Return SHA256 fingerprint of a public key file
+get_fingerprint() {
+  openssl dgst -sha256 "$1" 2>/dev/null | awk '{print $2}'
+}
+
+# Write SK8_RB_URL and SK8_BIN_DIR to the config file
+save_config() {
+  local url="$1" bin_dir="$2"
+  {
+    echo "SK8_RB_URL=\"${url}\""
+    echo "SK8_BIN_DIR=\"${bin_dir}\""
+  } > "${SK8_DIR}/config"
 }
 
 # Interactive setup wizard
@@ -46,8 +62,8 @@ run_setup() {
   read -rp "Enter rollerblades server URL: " server_url
 
   # Validate URL format
-  if [[ -z "$server_url" ]]; then
-    echo "Error: URL cannot be empty."
+  if [[ -z "${server_url}" ]]; then
+    echo "Error: URL cannot be empty." >&2
     exit 1
   fi
 
@@ -55,56 +71,56 @@ run_setup() {
   server_url="${server_url%/}"
 
   echo ""
-  echo "Connecting to $server_url..."
+  echo "Connecting to ${server_url}..."
 
   # Create temp dir for initial fetch
   local tmp_dir
   tmp_dir=$(mktemp -d)
   # shellcheck disable=SC2064  # Intentional: expand $tmp_dir now, not at signal time
-  trap "rm -rf '$tmp_dir'" EXIT
+  trap "rm -rf '${tmp_dir}'" EXIT
 
   # Try to fetch the public key
-  if ! curl -sSf --connect-timeout 10 "$server_url/rollerblades.pub" -o "$tmp_dir/rollerblades.pub" 2>/dev/null; then
-    echo "Error: Could not connect to server or fetch public key."
-    echo "Make sure the URL is correct and the server is running."
+  if ! curl -sSf --connect-timeout 10 "${server_url}/rollerblades.pub" -o "${tmp_dir}/rollerblades.pub" 2>/dev/null; then
+    echo "Error: Could not connect to server or fetch public key." >&2
+    echo "Make sure the URL is correct and the server is running." >&2
     exit 1
   fi
 
   # Calculate key fingerprint (SHA256 of the public key)
   local fingerprint
-  fingerprint=$(openssl dgst -sha256 "$tmp_dir/rollerblades.pub" 2>/dev/null | awk '{print $2}')
+  fingerprint=$(get_fingerprint "${tmp_dir}/rollerblades.pub")
 
-  if [[ -z "$fingerprint" ]]; then
-    echo "Error: Could not calculate key fingerprint."
+  if [[ -z "${fingerprint}" ]]; then
+    echo "Error: Could not calculate key fingerprint." >&2
     exit 1
   fi
 
   # Try to fetch MOTD (display as header)
-  if curl -sSf --connect-timeout 5 "$server_url/motd.txt" -o "$tmp_dir/motd.txt" 2>/dev/null; then
+  if curl -sSf --connect-timeout 5 "${server_url}/motd.txt" -o "${tmp_dir}/motd.txt" 2>/dev/null; then
     echo ""
-    sanitize_text "$MAX_MOTD_SIZE" < "$tmp_dir/motd.txt"
+    sanitize_text "${MAX_MOTD_SIZE}" < "${tmp_dir}/motd.txt"
     echo ""
   fi
 
   # Try to fetch server info
   local pkg_count="unknown"
-  if curl -sSf --connect-timeout 5 "$server_url/packages.txt" -o "$tmp_dir/packages.txt" 2>/dev/null; then
+  if curl -sSf --connect-timeout 5 "${server_url}/packages.txt" -o "${tmp_dir}/packages.txt" 2>/dev/null; then
     # Sanitize before counting
-    sanitize_text "$MAX_INDEX_SIZE" < "$tmp_dir/packages.txt" > "$tmp_dir/packages.txt.clean"
-    mv "$tmp_dir/packages.txt.clean" "$tmp_dir/packages.txt"
-    pkg_count=$(grep -cv '^#' "$tmp_dir/packages.txt" 2>/dev/null || echo "0")
+    sanitize_text "${MAX_INDEX_SIZE}" < "${tmp_dir}/packages.txt" > "${tmp_dir}/packages.txt.clean"
+    mv "${tmp_dir}/packages.txt.clean" "${tmp_dir}/packages.txt"
+    pkg_count=$(grep -cv '^#' "${tmp_dir}/packages.txt" 2>/dev/null || echo "0")
   fi
 
   echo "Server found!"
   echo ""
-  echo "  URL:         $server_url"
-  echo "  Packages:    $pkg_count available"
+  echo "  URL:         ${server_url}"
+  echo "  Packages:    ${pkg_count} available"
   echo "  Key SHA256:  ${fingerprint:0:16}...${fingerprint: -16}"
   echo ""
   echo "The authenticity of this server cannot be established."
   read -rp "Do you want to trust this server? (yes/no): " trust_response
 
-  if [[ "$trust_response" != "yes" ]]; then
+  if [[ "${trust_response}" != "yes" ]]; then
     echo "Aborted. No changes made."
     exit 1
   fi
@@ -113,39 +129,36 @@ run_setup() {
   echo ""
   echo "Where should sk8 create symlinks for package executables?"
   echo "  (Packages that provide executables will be linked here)"
-  read -rp "Bin directory [$HOME/.local/bin]: " bin_dir_input
-  bin_dir_input="${bin_dir_input:-$HOME/.local/bin}"
+  read -rp "Bin directory [${HOME}/.local/bin]: " bin_dir_input
+  bin_dir_input="${bin_dir_input:-${HOME}/.local/bin}"
   bin_dir_input="${bin_dir_input%/}"
 
   # Create directories
-  mkdir -p "$SK8_DIR/cache" "$SK8_DIR/package"
+  mkdir -p "${SK8_DIR}/cache" "${SK8_DIR}/package"
 
   # Save config
-  {
-    echo "SK8_RB_URL=\"$server_url\""
-    echo "SK8_BIN_DIR=\"$bin_dir_input\""
-  } > "$SK8_DIR/config"
+  save_config "${server_url}" "${bin_dir_input}"
 
   # Set for current session
-  SK8_BIN_DIR="$bin_dir_input"
+  SK8_BIN_DIR="${bin_dir_input}"
 
   # Copy public key
-  cp "$tmp_dir/rollerblades.pub" "$SK8_DIR/cache/rollerblades.pub"
+  cp "${tmp_dir}/rollerblades.pub" "${SK8_DIR}/cache/rollerblades.pub"
 
   # Copy packages.txt if we got it
-  if [[ -f "$tmp_dir/packages.txt" ]]; then
-    cp "$tmp_dir/packages.txt" "$SK8_DIR/cache/packages.txt"
+  if [[ -f "${tmp_dir}/packages.txt" ]]; then
+    cp "${tmp_dir}/packages.txt" "${SK8_DIR}/cache/packages.txt"
   fi
 
   # Copy motd.txt if we got it
-  if [[ -f "$tmp_dir/motd.txt" ]]; then
-    cp "$tmp_dir/motd.txt" "$SK8_DIR/cache/motd.txt"
+  if [[ -f "${tmp_dir}/motd.txt" ]]; then
+    cp "${tmp_dir}/motd.txt" "${SK8_DIR}/cache/motd.txt"
   fi
 
   echo ""
   echo "Setup complete!"
-  echo "  Config saved to: $SK8_DIR/config"
-  echo "  Public key saved to: $SK8_DIR/cache/rollerblades.pub"
+  echo "  Config saved to: ${SK8_DIR}/config"
+  echo "  Public key saved to: ${SK8_DIR}/cache/rollerblades.pub"
   echo ""
   echo "You can now use sk8 to install packages:"
   echo "  sk8 list              # Show available packages"
@@ -153,11 +166,11 @@ run_setup() {
   echo ""
 
   # Set the URL so the rest of the script can use it
-  SK8_RB_URL="$server_url"
+  SK8_RB_URL="${server_url}"
 
   # Clean up trap
   trap - EXIT
-  rm -rf "$tmp_dir"
+  rm -rf "${tmp_dir}"
 }
 
 # Non-interactive setup when SK8_RB_URL env var is set
@@ -168,24 +181,24 @@ auto_setup_from_env() {
   echo ""
 
   # Create directories
-  mkdir -p "$SK8_DIR/cache" "$SK8_DIR/package"
+  mkdir -p "${SK8_DIR}/cache" "${SK8_DIR}/package"
 
   # Download public key
-  if ! curl -sSf --connect-timeout 10 "$server_url/rollerblades.pub" -o "$SK8_DIR/cache/rollerblades.pub" 2>/dev/null; then
-    echo "Error: Could not fetch public key from $server_url/rollerblades.pub" >&2
+  if ! curl -sSf --connect-timeout 10 "${server_url}/rollerblades.pub" -o "${SK8_DIR}/cache/rollerblades.pub" 2>/dev/null; then
+    echo "Error: Could not fetch public key from ${server_url}/rollerblades.pub" >&2
     echo "Check that the server URL is correct and the server is running." >&2
     exit 1
   fi
 
   # Calculate and display fingerprint
   local fingerprint
-  fingerprint=$(openssl dgst -sha256 "$SK8_DIR/cache/rollerblades.pub" 2>/dev/null | awk '{print $2}')
+  fingerprint=$(get_fingerprint "${SK8_DIR}/cache/rollerblades.pub")
 
   echo "=========================================="
   echo "  WARNING: Auto-trusting server"
   echo ""
-  echo "  Server:      $server_url"
-  echo "  Key SHA256:  $fingerprint"
+  echo "  Server:      ${server_url}"
+  echo "  Key SHA256:  ${fingerprint:0:16}...${fingerprint: -16}"
   echo ""
   echo "  The server's public key has been trusted"
   echo "  automatically via SK8_RB_URL env var."
@@ -195,20 +208,17 @@ auto_setup_from_env() {
   echo ""
 
   # Set default bin dir
-  SK8_BIN_DIR="${SK8_BIN_DIR:-$HOME/.local/bin}"
+  SK8_BIN_DIR="${SK8_BIN_DIR:-${HOME}/.local/bin}"
 
   # Save config
-  {
-    echo "SK8_RB_URL=\"$server_url\""
-    echo "SK8_BIN_DIR=\"$SK8_BIN_DIR\""
-  } > "$SK8_DIR/config"
+  save_config "${server_url}" "${SK8_BIN_DIR}"
 
   # Fetch MOTD and index silently
   fetch_motd
-  curl -sSf --connect-timeout 5 --max-time 10 "$server_url/packages.txt" 2>/dev/null | \
-    sanitize_text "$MAX_INDEX_SIZE" > "$SK8_DIR/cache/packages.txt" || true
+  curl -sSf --connect-timeout 5 --max-time 10 "${server_url}/packages.txt" 2>/dev/null | \
+    sanitize_text "${MAX_INDEX_SIZE}" > "${SK8_DIR}/cache/packages.txt" || true
 
-  echo "Config saved to $SK8_DIR/config"
+  echo "Config saved to ${SK8_DIR}/config"
 }
 
 # Sanitize package name to prevent path traversal attacks
@@ -216,18 +226,18 @@ sanitize_package_name() {
   local pkg="$1"
 
   # Reject empty package names
-  if [[ -z "$pkg" ]]; then
+  if [[ -z "${pkg}" ]]; then
     echo "Error: Package name cannot be empty." >&2
     return 1
   fi
 
   # Only allow alphanumeric, dash, underscore, and dot (not at start)
   # Reject any path traversal attempts
-  if [[ "$pkg" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] && [[ ! "$pkg" =~ \.\. ]]; then
-    echo "$pkg"
+  if [[ "${pkg}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] && [[ ! "${pkg}" =~ \.\. ]]; then
+    echo "${pkg}"
     return 0
   else
-    echo "Error: Invalid package name '$pkg'. Names must start with alphanumeric and contain only alphanumeric, dash, underscore, or dot." >&2
+    echo "Error: Invalid package name '${pkg}'. Names must start with alphanumeric and contain only alphanumeric, dash, underscore, or dot." >&2
     return 1
   fi
 }
@@ -235,20 +245,20 @@ sanitize_package_name() {
 # Validate a path from the manifest (no traversal, no absolute, safe chars)
 validate_manifest_path() {
   local path="$1"
-  if [[ -z "$path" ]]; then
+  if [[ -z "${path}" ]]; then
     echo "Error: Empty path in manifest." >&2
     return 1
   fi
-  if [[ "$path" =~ ^/ ]]; then
-    echo "Error: Absolute path not allowed in manifest: $path" >&2
+  if [[ "${path}" =~ ^/ ]]; then
+    echo "Error: Absolute path not allowed in manifest: ${path}" >&2
     return 1
   fi
-  if [[ "$path" =~ \.\. ]]; then
-    echo "Error: Path traversal not allowed in manifest: $path" >&2
+  if [[ "${path}" =~ \.\. ]]; then
+    echo "Error: Path traversal not allowed in manifest: ${path}" >&2
     return 1
   fi
-  if ! [[ "$path" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
-    echo "Error: Invalid characters in manifest path: $path" >&2
+  if ! [[ "${path}" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+    echo "Error: Invalid characters in manifest path: ${path}" >&2
     return 1
   fi
   return 0
@@ -259,7 +269,7 @@ validate_manifest_path() {
 # shellcheck disable=SC2034  # MANIFEST_* vars are used by callers
 read_manifest() {
   local pkg="$1"
-  local manifest="$SK8_DIR/package/$pkg/sk8.manifest"
+  local manifest="${SK8_DIR}/package/${pkg}/sk8.manifest"
 
   # Clear all manifest vars
   MANIFEST_NAME=""
@@ -270,15 +280,15 @@ read_manifest() {
   MANIFEST_SETUP=""
   MANIFEST_SETUP_ON_UPGRADE=""
 
-  [[ -f "$manifest" ]] || return 1
+  [[ -f "${manifest}" ]] || return 1
 
   local line_count=0
-  while IFS= read -r line || [[ -n "$line" ]]; do
+  while IFS= read -r line || [[ -n "${line}" ]]; do
     ((line_count++))
-    [[ $line_count -gt 1024 ]] && break
+    [[ ${line_count} -gt 1024 ]] && break
 
     # Skip comments and empty lines
-    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
 
     # Split on first '='
     local key="${line%%=*}"
@@ -287,12 +297,12 @@ read_manifest() {
     # Trim whitespace from key
     key="${key// /}"
 
-    case "$key" in
+    case "${key}" in
       NAME)
         MANIFEST_NAME="${value:0:128}"
         ;;
       VERSION)
-        if [[ "$value" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+        if [[ "${value}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
           MANIFEST_VERSION="${value:0:64}"
         fi
         ;;
@@ -300,31 +310,31 @@ read_manifest() {
         MANIFEST_DESCRIPTION="${value:0:256}"
         ;;
       EXECUTABLE)
-        if validate_manifest_path "$value"; then
-          MANIFEST_EXECUTABLE="$value"
+        if validate_manifest_path "${value}"; then
+          MANIFEST_EXECUTABLE="${value}"
         fi
         ;;
       EXTRA_BINARIES)
         local validated_bins=""
-        for bin_path in $value; do
-          if validate_manifest_path "$bin_path"; then
-            validated_bins="$validated_bins $bin_path"
+        for bin_path in ${value}; do
+          if validate_manifest_path "${bin_path}"; then
+            validated_bins="${validated_bins} ${bin_path}"
           fi
         done
         MANIFEST_EXTRA_BINARIES="${validated_bins# }"
         ;;
       SETUP)
-        if validate_manifest_path "$value"; then
-          MANIFEST_SETUP="$value"
+        if validate_manifest_path "${value}"; then
+          MANIFEST_SETUP="${value}"
         fi
         ;;
       SETUP_ON_UPGRADE)
-        if [[ "$value" == "true" || "$value" == "false" ]]; then
-          MANIFEST_SETUP_ON_UPGRADE="$value"
+        if [[ "${value}" == "true" || "${value}" == "false" ]]; then
+          MANIFEST_SETUP_ON_UPGRADE="${value}"
         fi
         ;;
     esac
-  done < <(head -c 65536 "$manifest")
+  done < <(head -c 65536 "${manifest}")
 }
 
 # Check if a binary name conflicts with existing files
@@ -332,117 +342,105 @@ read_manifest() {
 check_bin_conflict() {
   local binary_name="$1"
   local pkg="$2"
-  local target="$SK8_BIN_DIR/$binary_name"
+  local target="${SK8_BIN_DIR}/${binary_name}"
 
   # Check the bin dir directly
-  if [[ -e "$target" || -L "$target" ]]; then
-    if [[ -L "$target" ]]; then
+  if [[ -e "${target}" || -L "${target}" ]]; then
+    if [[ -L "${target}" ]]; then
       local resolved
-      resolved=$(readlink "$target")
-      if [[ "$resolved" == "$SK8_DIR/package/$pkg/"* ]]; then
+      resolved=$(readlink "${target}")
+      if [[ "${resolved}" == "${SK8_DIR}/package/${pkg}/"* ]]; then
         # Our own symlink from a previous install -- safe to overwrite
         return 0
       fi
     fi
-    echo "Warning: '$binary_name' already exists in $SK8_BIN_DIR. Skipping symlink." >&2
+    echo "Warning: '${binary_name}' already exists in ${SK8_BIN_DIR}. Skipping symlink." >&2
     return 1
   fi
 
   # Check PATH for shadowing (soft warning, still allow)
   local existing
-  existing=$(command -v "$binary_name" 2>/dev/null)
-  if [[ -n "$existing" && "$existing" != "$target" ]]; then
-    echo "Note: '$binary_name' also exists at $existing. Symlink will be created but PATH order determines precedence." >&2
+  existing=$(command -v "${binary_name}" 2>/dev/null)
+  if [[ -n "${existing}" && "${existing}" != "${target}" ]]; then
+    echo "Note: '${binary_name}' also exists at ${existing}. Symlink will be created but PATH order determines precedence." >&2
   fi
 
   return 0
+}
+
+# Create a single symlink for a package binary; handles chmod, conflict check, and feedback
+link_binary() {
+  local pkg="$1"
+  local bin_path="$2"
+  local src="${SK8_DIR}/package/${pkg}/${bin_path}"
+  local bin_name
+  bin_name=$(basename "${bin_path}")
+
+  if [[ -f "${src}" ]]; then
+    chmod +x "${src}"
+    if check_bin_conflict "${bin_name}" "${pkg}"; then
+      ln -sf "${src}" "${SK8_BIN_DIR}/${bin_name}"
+      echo "Linked '${bin_name}' -> ${src}"
+    fi
+  else
+    echo "Warning: '${bin_path}' not found in package '${pkg}'. Skipping symlink." >&2
+  fi
 }
 
 # Create symlinks for package executables based on manifest
 create_symlinks() {
   local pkg="$1"
 
-  read_manifest "$pkg" || return 0
+  read_manifest "${pkg}" || return 0
 
-  if [[ -z "$MANIFEST_EXECUTABLE" ]]; then
+  if [[ -z "${MANIFEST_EXECUTABLE}" ]]; then
     return 0
   fi
 
-  # Ensure bin dir exists
-  if ! mkdir -p "$SK8_BIN_DIR" 2>/dev/null; then
-    echo "Warning: Could not create bin directory $SK8_BIN_DIR. Skipping symlinks." >&2
+  if ! mkdir -p "${SK8_BIN_DIR}" 2>/dev/null; then
+    echo "Warning: Could not create bin directory ${SK8_BIN_DIR}. Skipping symlinks." >&2
     return 0
   fi
 
-  # Link main executable
-  local src="$SK8_DIR/package/$pkg/$MANIFEST_EXECUTABLE"
-  local bin_name
-  bin_name=$(basename "$MANIFEST_EXECUTABLE")
-
-  if [[ -f "$src" ]]; then
-    chmod +x "$src"
-    if check_bin_conflict "$bin_name" "$pkg"; then
-      ln -sf "$src" "$SK8_BIN_DIR/$bin_name"
-      echo "Linked '$bin_name' -> $src"
-    fi
-  else
-    echo "Warning: Manifest EXECUTABLE '$MANIFEST_EXECUTABLE' not found in package. Skipping symlink." >&2
-  fi
-
-  # Link extra binaries
-  if [[ -n "$MANIFEST_EXTRA_BINARIES" ]]; then
-    for bin_path in $MANIFEST_EXTRA_BINARIES; do
-      src="$SK8_DIR/package/$pkg/$bin_path"
-      bin_name=$(basename "$bin_path")
-
-      if [[ -f "$src" ]]; then
-        chmod +x "$src"
-        if check_bin_conflict "$bin_name" "$pkg"; then
-          ln -sf "$src" "$SK8_BIN_DIR/$bin_name"
-          echo "Linked '$bin_name' -> $src"
-        fi
-      else
-        echo "Warning: Manifest EXTRA_BINARIES '$bin_path' not found in package. Skipping." >&2
-      fi
-    done
-  fi
+  link_binary "${pkg}" "${MANIFEST_EXECUTABLE}"
+  for bin_path in ${MANIFEST_EXTRA_BINARIES}; do
+    link_binary "${pkg}" "${bin_path}"
+  done
 }
 
 # Remove symlinks belonging to a package (scans bin dir, no manifest needed)
 remove_symlinks() {
   local pkg="$1"
 
-  [[ -d "$SK8_BIN_DIR" ]] || return 0
+  [[ -d "${SK8_BIN_DIR}" ]] || return 0
 
-  for link in "$SK8_BIN_DIR"/*; do
-    [[ -L "$link" ]] || continue
+  for link in "${SK8_BIN_DIR}"/*; do
+    [[ -L "${link}" ]] || continue
     local resolved
-    resolved=$(readlink "$link")
-    if [[ "$resolved" == "$SK8_DIR/package/$pkg/"* ]]; then
-      rm -f "$link"
-      echo "Removed symlink '$(basename "$link")'"
+    resolved=$(readlink "${link}")
+    if [[ "${resolved}" == "${SK8_DIR}/package/${pkg}/"* ]]; then
+      rm -f "${link}"
+      echo "Removed symlink '$(basename "${link}")'"
     fi
   done
 }
 
-# Save package version from manifest
+# Save package version from manifest (requires read_manifest to have been called first)
 save_version() {
   local pkg="$1"
 
-  read_manifest "$pkg" || return 0
-
-  if [[ -n "$MANIFEST_VERSION" ]]; then
-    echo "$MANIFEST_VERSION" > "$SK8_DIR/package/$pkg/.sk8_version" 2>/dev/null
+  if [[ -n "${MANIFEST_VERSION}" ]]; then
+    echo "${MANIFEST_VERSION}" > "${SK8_DIR}/package/${pkg}/.sk8_version" 2>/dev/null
   fi
 }
 
 # Get installed version for a package (prints version or empty string)
 get_version() {
   local pkg="$1"
-  local version_file="$SK8_DIR/package/$pkg/.sk8_version"
+  local version_file="${SK8_DIR}/package/${pkg}/.sk8_version"
 
-  if [[ -f "$version_file" ]]; then
-    head -1 "$version_file" 2>/dev/null
+  if [[ -f "${version_file}" ]]; then
+    head -1 "${version_file}" 2>/dev/null
   fi
 }
 
@@ -451,62 +449,62 @@ run_package_setup() {
   local pkg="$1"
   local is_upgrade="$2"
 
-  read_manifest "$pkg" || return 0
+  read_manifest "${pkg}" || return 0
 
-  if [[ -z "$MANIFEST_SETUP" ]]; then
+  if [[ -z "${MANIFEST_SETUP}" ]]; then
     return 0
   fi
 
   # Skip on upgrade unless SETUP_ON_UPGRADE is true
-  if [[ "$is_upgrade" == "true" && "$MANIFEST_SETUP_ON_UPGRADE" != "true" ]]; then
+  if [[ "${is_upgrade}" == "true" && "${MANIFEST_SETUP_ON_UPGRADE}" != "true" ]]; then
     return 0
   fi
 
-  local setup_path="$SK8_DIR/package/$pkg/$MANIFEST_SETUP"
+  local setup_path="${SK8_DIR}/package/${pkg}/${MANIFEST_SETUP}"
 
-  if [[ ! -f "$setup_path" ]]; then
-    echo "Warning: Setup script '$MANIFEST_SETUP' not found in package." >&2
+  if [[ ! -f "${setup_path}" ]]; then
+    echo "Warning: Setup script '${MANIFEST_SETUP}' not found in package." >&2
     return 0
   fi
 
   # Non-interactive: skip with info message
   if [[ ! -t 0 ]]; then
-    echo "Note: Package '$pkg' has a setup wizard. Run 'sk8 setup $pkg' to configure."
+    echo "Note: Package '${pkg}' has a setup wizard. Run 'sk8 setup ${pkg}' to configure."
     return 0
   fi
 
-  read -rp "Package '$pkg' has a setup wizard. Run it now? [y/n]: " answer
-  if [[ "$answer" != "y" && "$answer" != "Y" ]]; then
-    echo "Skipping setup. Run 'sk8 setup $pkg' later to configure."
+  read -rp "Package '${pkg}' has a setup wizard. Run it now? [y/n]: " answer
+  if [[ "${answer}" != "y" && "${answer}" != "Y" ]]; then
+    echo "Skipping setup. Run 'sk8 setup ${pkg}' later to configure."
     return 0
   fi
 
-  chmod +x "$setup_path"
-  (cd "$SK8_DIR/package/$pkg" && ./"$MANIFEST_SETUP")
+  chmod +x "${setup_path}"
+  (cd "${SK8_DIR}/package/${pkg}" && ./"${MANIFEST_SETUP}")
   local rc=$?
-  if [[ $rc -ne 0 ]]; then
-    echo "Warning: Setup script exited with code $rc."
+  if [[ ${rc} -ne 0 ]]; then
+    echo "Warning: Setup script exited with code ${rc}." >&2
   fi
-  return $rc
+  return ${rc}
 }
 
 # Clean up cached files for a package
 cleanup_cache() {
   local pkg="$1"
-  rm -f "$SK8_DIR/cache/${pkg}.tar.gz" "$SK8_DIR/cache/${pkg}.signature"
+  rm -f "${SK8_DIR}/cache/${pkg}.tar.gz" "${SK8_DIR}/cache/${pkg}.signature"
 }
 
 # Function to load configuration from file or set default values
 load_config() {
 
-  if [[ -z "$SK8_DIR" ]]; then
-    SK8_DIR="$HOME/.sk8"
+  if [[ -z "${SK8_DIR}" ]]; then
+    SK8_DIR="${HOME}/.sk8"
   fi
 
   # Check if first run (no config exists)
-  if ! [[ -f "$SK8_DIR/config" ]]; then
+  if ! [[ -f "${SK8_DIR}/config" ]]; then
     # Auto-setup if SK8_RB_URL env var is set
-    if [[ -n "$SK8_RB_URL" ]]; then
+    if [[ -n "${SK8_RB_URL}" ]]; then
       auto_setup_from_env
       return
     fi
@@ -516,7 +514,7 @@ load_config() {
       run_setup
       return
     else
-      echo "Error: No config found at $SK8_DIR/config" >&2
+      echo "Error: No config found at ${SK8_DIR}/config" >&2
       echo "Set SK8_RB_URL environment variable for auto-setup:" >&2
       echo "  SK8_RB_URL=https://your-server.com sk8 list" >&2
       echo "" >&2
@@ -526,26 +524,27 @@ load_config() {
   fi
 
   # Load existing config
-  source "$SK8_DIR/config"
+  # shellcheck source=/dev/null
+  source "${SK8_DIR}/config"
 
   # Set default bin directory if not configured
-  if [[ -z "$SK8_BIN_DIR" ]]; then
-    SK8_BIN_DIR="$HOME/.local/bin"
+  if [[ -z "${SK8_BIN_DIR}" ]]; then
+    SK8_BIN_DIR="${HOME}/.local/bin"
   fi
 
   # Ensure directories exist
-  mkdir -p "$SK8_DIR/cache" "$SK8_DIR/package"
+  mkdir -p "${SK8_DIR}/cache" "${SK8_DIR}/package"
 
-  if [[ -z "$SK8_RB_URL" ]]; then
-    echo "Error: SK8_RB_URL not set in $SK8_DIR/config" >&2
+  if [[ -z "${SK8_RB_URL}" ]]; then
+    echo "Error: SK8_RB_URL not set in ${SK8_DIR}/config" >&2
     exit 1
   fi
 
   # Download public key if missing
-  if ! [[ -f "$SK8_DIR/cache/rollerblades.pub" ]]; then
+  if ! [[ -f "${SK8_DIR}/cache/rollerblades.pub" ]]; then
     echo "Downloading server public key..."
     dl rollerblades.pub || {
-      echo "Error: Failed to download repo public key for package verification."
+      echo "Error: Failed to download repo public key for package verification." >&2
       exit 1
     }
   fi
@@ -555,172 +554,197 @@ load_config() {
 dl(){
   echo "Downloading '$1'" >&2
 
-  curl -sSf --connect-timeout 30 --max-time 300 "${SK8_RB_URL}/$1" -o "$SK8_DIR/cache/$1" || {
+  curl -sSf --connect-timeout 30 --max-time 300 "${SK8_RB_URL}/$1" -o "${SK8_DIR}/cache/$1" || {
     echo "Error: Failed to download '${SK8_RB_URL}/$1'" >&2
-    rm -f "$SK8_DIR/cache/$1"
+    rm -f "${SK8_DIR}/cache/$1"
     return 1
   }
 }
 
-# Function to verify package integrity
+# Verify cryptographic signature of a downloaded package archive
 verify_package() {
   local package="$1"
 
-  echo "Verifying package $package..."
-  dl "$package.signature" || {
-    echo "Error: Failed to download package signature for $package."
+  echo "Verifying package ${package}..."
+  dl "${package}.signature" || {
+    echo "Error: Failed to download package signature for ${package}." >&2
     return 1
   }
 
   # Verify signature using SHA256 (matching rollerblades signing algorithm)
-  if openssl dgst -sha256 -verify "$SK8_DIR/cache/rollerblades.pub" -signature "$SK8_DIR/cache/$package.signature" "$SK8_DIR/cache/$package.tar.gz" >/dev/null; then
-    echo "Package $package verified successfully."
+  if openssl dgst -sha256 -verify "${SK8_DIR}/cache/rollerblades.pub" -signature "${SK8_DIR}/cache/${package}.signature" "${SK8_DIR}/cache/${package}.tar.gz" >/dev/null; then
+    echo "Package ${package} verified successfully."
     return 0
   else
-    echo "Error: Package $package signature verification failed."
+    echo "Error: Package ${package} signature verification failed." >&2
     return 1
   fi
 }
 
-# Function to install a package
 install_package() {
+  local package
   package=$(sanitize_package_name "$1") || return 1
 
-  if [[ -d "$SK8_DIR/package/$package" ]]; then
-    echo "Package '$package' is already installed."
+  if [[ -d "${SK8_DIR}/package/${package}" ]]; then
+    echo "Package '${package}' is already installed."
     return 0
   fi
 
   # Auto-fetch index if not yet downloaded
-  if [[ ! -f "$SK8_DIR/cache/packages.txt" ]]; then
+  if [[ ! -f "${SK8_DIR}/cache/packages.txt" ]]; then
     echo "Package index not found. Fetching from server..."
     fetch_index || echo "Warning: Could not fetch package index. Continuing with install..." >&2
   fi
 
-  echo "Installing $package..."
-  mkdir -p "$SK8_DIR/package/$package"
-  dl "$package.tar.gz" || {
-    echo "Error: Failed to download package '$package'."
-    rm -rf "$SK8_DIR/package/$package"
+  echo "Installing ${package}..."
+  mkdir -p "${SK8_DIR}/package/${package}"
+  dl "${package}.tar.gz" || {
+    echo "Error: Failed to download package '${package}'." >&2
+    rm -rf "${SK8_DIR}/package/${package}"
     return 1
   }
 
-  verify_package "$package" || {
-    echo "Error: Failed to verify package '$package'."
-    cleanup_cache "$package"
-    rm -rf "$SK8_DIR/package/$package"
+  verify_package "${package}" || {
+    echo "Error: Failed to verify package '${package}'." >&2
+    cleanup_cache "${package}"
+    rm -rf "${SK8_DIR}/package/${package}"
     return 1
   }
 
-  tar -xz --no-same-owner -C "$SK8_DIR/package/$package" -f "$SK8_DIR/cache/$package.tar.gz" || {
-    echo "Error: Failed to extract package '$package'."
-    cleanup_cache "$package"
-    rm -rf "$SK8_DIR/package/$package"
+  tar -xz --no-same-owner -C "${SK8_DIR}/package/${package}" -f "${SK8_DIR}/cache/${package}.tar.gz" || {
+    echo "Error: Failed to extract package '${package}'." >&2
+    cleanup_cache "${package}"
+    rm -rf "${SK8_DIR}/package/${package}"
     return 1
   }
 
-  cleanup_cache "$package"
-  create_symlinks "$package"
-  save_version "$package"
-  echo "'$package' has been installed in '$SK8_DIR/package/$package'"
-  run_package_setup "$package" false
+  cleanup_cache "${package}"
+  create_symlinks "${package}"
+  save_version "${package}"
+  echo "'${package}' has been installed in '${SK8_DIR}/package/${package}'"
+  run_package_setup "${package}" false
 }
 
-# Function to remove a package
 remove_package() {
   if [[ -z "$1" ]]; then
-    echo "Error: No package specified."
+    echo "Error: No package specified." >&2
     return 1
   fi
+  local package
   package=$(sanitize_package_name "$1") || return 1
 
-  if [[ ! -d "$SK8_DIR/package/$package" ]]; then
-    echo "Package $package is not installed."
+  if [[ ! -d "${SK8_DIR}/package/${package}" ]]; then
+    echo "Package ${package} is not installed." >&2
     return 1
   fi
 
-  echo "Removing $package..."
-  remove_symlinks "$package"
+  echo "Removing ${package}..."
+  remove_symlinks "${package}"
   rm -rf "${SK8_DIR}/package/${package}" || {
-    echo "Error: Failed to remove $package."
+    echo "Error: Failed to remove ${package}." >&2
     return 1
   }
 
-  echo "$package has been removed."
+  echo "${package} has been removed."
 }
 
-# Function to upgrade a package
 upgrade_package() {
   if [[ -z "$1" ]]; then
-    echo "Error: No package specified."
+    echo "Error: No package specified." >&2
     return 1
   fi
+  local package
   package=$(sanitize_package_name "$1") || return 1
 
-  if [[ ! -d "$SK8_DIR/package/$package" ]]; then
-    echo "Package $package is not installed."
+  if [[ ! -d "${SK8_DIR}/package/${package}" ]]; then
+    echo "Package ${package} is not installed." >&2
     return 1
   fi
 
-  echo "Upgrading $package..."
+  echo "Upgrading ${package}..."
 
-  # Save old version before upgrade
   local old_version
-  old_version=$(get_version "$package")
+  old_version=$(get_version "${package}")
 
-  dl "$package.tar.gz" || {
-    echo "Error: Failed to download package $package."
+  dl "${package}.tar.gz" || {
+    echo "Error: Failed to download package ${package}." >&2
     return 1
   }
 
-  verify_package "$package" || {
-    echo "Error: Failed to verify package $package."
-    cleanup_cache "$package"
+  verify_package "${package}" || {
+    echo "Error: Failed to verify package ${package}." >&2
+    cleanup_cache "${package}"
     return 1
   }
 
-  # Remove old symlinks (paths may change in new version)
-  remove_symlinks "$package"
-
-  tar -xz --no-same-owner -C "$SK8_DIR/package/$package" -f "$SK8_DIR/cache/$package.tar.gz" || {
-    echo "Error: Failed to extract package $package."
-    cleanup_cache "$package"
+  # Extract into a temp dir on the same filesystem so mv is a rename (atomic)
+  local tmp_extract
+  tmp_extract=$(mktemp -d "${SK8_DIR}/package/.tmp_XXXXXX") || {
+    echo "Error: Failed to create temporary directory for extraction." >&2
+    cleanup_cache "${package}"
     return 1
   }
 
-  cleanup_cache "$package"
-  create_symlinks "$package"
-  save_version "$package"
+  tar -xz --no-same-owner -C "${tmp_extract}" -f "${SK8_DIR}/cache/${package}.tar.gz" || {
+    echo "Error: Failed to extract package ${package}." >&2
+    cleanup_cache "${package}"
+    rm -rf "${tmp_extract}"
+    return 1
+  }
+
+  cleanup_cache "${package}"
+
+  # Swap: rename live dir to backup, rename temp dir to live
+  local old_backup="${SK8_DIR}/package/.${package}.old"
+  mv "${SK8_DIR}/package/${package}" "${old_backup}" || {
+    echo "Error: Failed to back up existing package ${package}." >&2
+    rm -rf "${tmp_extract}"
+    return 1
+  }
+
+  if ! mv "${tmp_extract}" "${SK8_DIR}/package/${package}"; then
+    echo "Error: Failed to swap in new version of ${package}. Restoring previous version..." >&2
+    mv "${old_backup}" "${SK8_DIR}/package/${package}"
+    return 1
+  fi
+
+  # Refresh symlinks now that the new dir is in place
+  remove_symlinks "${package}"
+  create_symlinks "${package}"
+  save_version "${package}"
+
+  # Remove the backup only after everything succeeded
+  rm -rf "${old_backup}"
 
   local new_version
-  new_version=$(get_version "$package")
+  new_version=$(get_version "${package}")
 
-  if [[ -n "$old_version" && -n "$new_version" && "$old_version" != "$new_version" ]]; then
-    echo "$package has been upgraded ($old_version -> $new_version)."
+  if [[ -n "${old_version}" && -n "${new_version}" && "${old_version}" != "${new_version}" ]]; then
+    echo "${package} has been upgraded (${old_version} -> ${new_version})."
   else
-    echo "$package has been upgraded."
+    echo "${package} has been upgraded."
   fi
 
-  run_package_setup "$package" true
+  run_package_setup "${package}" true
 }
 
 # Upgrade all installed packages
 upgrade_all() {
-  local pkg_dir="$SK8_DIR/package"
+  local pkg_dir="${SK8_DIR}/package"
   local upgraded=0
   local failed=0
 
-  if [[ ! -d "$pkg_dir" ]] || [[ -z "$(ls -A "$pkg_dir" 2>/dev/null)" ]]; then
+  if [[ ! -d "${pkg_dir}" ]] || [[ -z "$(ls -A "${pkg_dir}" 2>/dev/null)" ]]; then
     echo "No packages installed."
     return 0
   fi
 
   echo "Upgrading all installed packages..."
-  for pkg_path in "$pkg_dir"/*; do
-    if [[ -d "$pkg_path" ]]; then
+  for pkg_path in "${pkg_dir}"/*; do
+    if [[ -d "${pkg_path}" ]]; then
       local pkg
-      pkg=$(basename "$pkg_path")
-      if upgrade_package "$pkg"; then
+      pkg=$(basename "${pkg_path}")
+      if upgrade_package "${pkg}"; then
         ((upgraded++))
       else
         ((failed++))
@@ -728,19 +752,19 @@ upgrade_all() {
     fi
   done
 
-  echo "Upgrade complete: $upgraded succeeded, $failed failed."
+  echo "Upgrade complete: ${upgraded} succeeded, ${failed} failed."
 }
 
 # Fetch package index from server
 fetch_index() {
   echo "Fetching package index..."
   dl "packages.txt" || {
-    echo "Error: Failed to fetch package index."
+    echo "Error: Failed to fetch package index." >&2
     return 1
   }
   # Sanitize the downloaded index
-  sanitize_text "$MAX_INDEX_SIZE" < "$SK8_DIR/cache/packages.txt" > "$SK8_DIR/cache/packages.txt.tmp" && \
-    mv "$SK8_DIR/cache/packages.txt.tmp" "$SK8_DIR/cache/packages.txt"
+  sanitize_text "${MAX_INDEX_SIZE}" < "${SK8_DIR}/cache/packages.txt" > "${SK8_DIR}/cache/packages.txt.tmp" && \
+    mv "${SK8_DIR}/cache/packages.txt.tmp" "${SK8_DIR}/cache/packages.txt"
 
   # Fetch and display MOTD as header
   fetch_motd
@@ -751,9 +775,9 @@ fetch_index() {
 
 # List available packages from index
 list_available() {
-  local index="$SK8_DIR/cache/packages.txt"
+  local index="${SK8_DIR}/cache/packages.txt"
 
-  if [[ ! -f "$index" ]]; then
+  if [[ ! -f "${index}" ]]; then
     echo "Package index not found. Fetching from server..."
     fetch_index || {
       echo "Error: Could not fetch package index." >&2
@@ -765,168 +789,173 @@ list_available() {
   # Read sanitized content
   while IFS= read -r pkg; do
     # Skip empty lines and comments
-    [[ -z "$pkg" || "$pkg" =~ ^# ]] && continue
+    [[ -z "${pkg}" || "${pkg}" =~ ^# ]] && continue
 
     # Extra validation: only show valid package names
-    if [[ "$pkg" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] && [[ ! "$pkg" =~ \.\. ]]; then
-      if [[ -d "$SK8_DIR/package/$pkg" ]]; then
+    if [[ "${pkg}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] && [[ ! "${pkg}" =~ \.\. ]]; then
+      if [[ -d "${SK8_DIR}/package/${pkg}" ]]; then
         local ver
-        ver=$(get_version "$pkg")
-        if [[ -n "$ver" ]]; then
-          echo "  $pkg [installed: $ver]"
+        ver=$(get_version "${pkg}")
+        if [[ -n "${ver}" ]]; then
+          echo "  ${pkg} [installed: ${ver}]"
         else
-          echo "  $pkg [installed]"
+          echo "  ${pkg} [installed]"
         fi
       else
-        echo "  $pkg"
+        echo "  ${pkg}"
       fi
     fi
-  done < <(sanitize_text "$MAX_INDEX_SIZE" < "$index")
+  done < <(sanitize_text "${MAX_INDEX_SIZE}" < "${index}")
 }
 
 # List installed packages
 list_installed() {
-  local pkg_dir="$SK8_DIR/package"
+  local pkg_dir="${SK8_DIR}/package"
 
-  if [[ ! -d "$pkg_dir" ]] || [[ -z "$(ls -A "$pkg_dir" 2>/dev/null)" ]]; then
+  if [[ ! -d "${pkg_dir}" ]] || [[ -z "$(ls -A "${pkg_dir}" 2>/dev/null)" ]]; then
     echo "No packages installed."
     return 0
   fi
 
   echo "Installed packages:"
-  for pkg_path in "$pkg_dir"/*; do
-    if [[ -d "$pkg_path" ]]; then
+  for pkg_path in "${pkg_dir}"/*; do
+    if [[ -d "${pkg_path}" ]]; then
       local pkg
-      pkg=$(basename "$pkg_path")
+      pkg=$(basename "${pkg_path}")
       local ver
-      ver=$(get_version "$pkg")
-      if [[ -n "$ver" ]]; then
-        echo "  $pkg ($ver)"
+      ver=$(get_version "${pkg}")
+      if [[ -n "${ver}" ]]; then
+        echo "  ${pkg} (${ver})"
       else
-        echo "  $pkg"
+        echo "  ${pkg}"
       fi
     fi
   done
 }
 
-# Main script
-load_config
+main() {
+  load_config
 
-case "$1" in
-  setup)
-    if [[ -n "$2" ]]; then
-      # Run package setup script
-      package=$(sanitize_package_name "$2") || exit 1
-      if [[ ! -d "$SK8_DIR/package/$package" ]]; then
-        echo "Package '$package' is not installed."
-        exit 1
-      fi
-      read_manifest "$package"
-      if [[ -z "$MANIFEST_SETUP" ]]; then
-        echo "Package '$package' does not have a setup script."
-        exit 1
-      fi
-      setup_script="$SK8_DIR/package/$package/$MANIFEST_SETUP"
-      if [[ ! -f "$setup_script" ]]; then
-        echo "Error: Setup script not found: $MANIFEST_SETUP"
-        exit 1
-      fi
-      chmod +x "$setup_script"
-      (cd "$SK8_DIR/package/$package" && ./"$MANIFEST_SETUP")
-    else
-      # Force re-run setup (remove existing config first)
-      if [[ -f "$SK8_DIR/config" ]]; then
-        echo "Existing configuration found at $SK8_DIR/config"
-        read -rp "Do you want to reconfigure? This will replace your current settings. (yes/no): " confirm
-        if [[ "$confirm" != "yes" ]]; then
-          echo "Aborted."
-          exit 0
+  case "$1" in
+    setup)
+      if [[ -n "$2" ]]; then
+        # Run package setup script
+        local package setup_script
+        package=$(sanitize_package_name "$2") || exit 1
+        if [[ ! -d "${SK8_DIR}/package/${package}" ]]; then
+          echo "Package '${package}' is not installed." >&2
+          exit 1
         fi
-        rm -f "$SK8_DIR/config" "$SK8_DIR/cache/rollerblades.pub"
+        read_manifest "${package}"
+        if [[ -z "${MANIFEST_SETUP}" ]]; then
+          echo "Package '${package}' does not have a setup script." >&2
+          exit 1
+        fi
+        setup_script="${SK8_DIR}/package/${package}/${MANIFEST_SETUP}"
+        if [[ ! -f "${setup_script}" ]]; then
+          echo "Error: Setup script not found: ${MANIFEST_SETUP}" >&2
+          exit 1
+        fi
+        chmod +x "${setup_script}"
+        (cd "${SK8_DIR}/package/${package}" && ./"${MANIFEST_SETUP}")
+      else
+        # Force re-run setup (remove existing config first)
+        if [[ -f "${SK8_DIR}/config" ]]; then
+          echo "Existing configuration found at ${SK8_DIR}/config"
+          read -rp "Do you want to reconfigure? This will replace your current settings. (yes/no): " confirm
+          if [[ "${confirm}" != "yes" ]]; then
+            echo "Aborted."
+            exit 0
+          fi
+          rm -f "${SK8_DIR}/config" "${SK8_DIR}/cache/rollerblades.pub"
+        fi
+        run_setup
       fi
-      run_setup
-    fi
-    ;;
-  install)
-    install_package "$2"
-    ;;
-  remove|uninstall)
-    remove_package "$2"
-    ;;
-  update)
-    # apt-style: update refreshes the package index
-    fetch_index
-    ;;
-  upgrade)
-    # apt-style: upgrade updates packages
-    if [[ -n "$2" ]]; then
-      upgrade_package "$2"
-    else
-      upgrade_all
-    fi
-    ;;
-  reinstall|force-install|re-install)
-    remove_package "$2"
-    install_package "$2"
-    ;;
-  list)
-    case "$2" in
-      --installed|-i)
-        list_installed
-        ;;
-      "")
-        list_available
-        ;;
-      *)
-        echo "Usage: sk8 list [--installed]"
-        exit 1
-        ;;
-    esac
-    ;;
-  config)
-    echo "sk8 configuration"
-    echo "================="
-    echo ""
-    echo "  Config file:   $SK8_DIR/config"
-    echo "  Cache dir:     $SK8_DIR/cache"
-    echo "  Package dir:   $SK8_DIR/package"
-    echo "  Server URL:    $SK8_RB_URL"
-    echo "  Bin dir:       $SK8_BIN_DIR"
-    if [[ -f "$SK8_DIR/cache/rollerblades.pub" ]]; then
-      fingerprint=$(openssl dgst -sha256 "$SK8_DIR/cache/rollerblades.pub" 2>/dev/null | awk '{print $2}')
-      echo "  Signing key:   ${fingerprint:0:16}...${fingerprint: -16}"
-    else
-      echo "  Signing key:   (not found)"
-    fi
-    pkg_count=0
-    if [[ -f "$SK8_DIR/cache/packages.txt" ]]; then
-      pkg_count=$(grep -cv '^#' "$SK8_DIR/cache/packages.txt" 2>/dev/null || echo "0")
-    fi
-    installed_count=0
-    if [[ -d "$SK8_DIR/package" ]]; then
-      installed_count=$(find "$SK8_DIR/package" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
-    fi
-    echo "  Packages:      $pkg_count available, $installed_count installed"
-    ;;
-  edit)
-    "${EDITOR:-nano}" "$SK8_DIR/config"
-    ;;
-  *)
-    echo "Usage: sk8 <command> [package_name]"
-    echo ""
-    echo "Commands:"
-    echo "  setup             Configure sk8 (interactive)"
-    echo "  setup <pkg>       Run package setup wizard"
-    echo "  install <pkg>     Install a package"
-    echo "  remove <pkg>      Remove a package"
-    echo "  reinstall <pkg>   Remove and reinstall a package"
-    echo "  update            Fetch latest package index"
-    echo "  upgrade [pkg]     Upgrade all packages or a specific package"
-    echo "  list              List available packages"
-    echo "  list --installed  List installed packages"
-    echo "  config            Show current configuration"
-    echo "  edit              Open config in \$EDITOR"
-    exit 1
-    ;;
-esac
+      ;;
+    install)
+      install_package "$2"
+      ;;
+    remove|uninstall)
+      remove_package "$2"
+      ;;
+    update)
+      # apt-style: update refreshes the package index
+      fetch_index
+      ;;
+    upgrade)
+      # apt-style: upgrade updates packages
+      if [[ -n "$2" ]]; then
+        upgrade_package "$2"
+      else
+        upgrade_all
+      fi
+      ;;
+    reinstall|force-install|re-install)
+      remove_package "$2"
+      install_package "$2"
+      ;;
+    list)
+      case "$2" in
+        --installed|-i)
+          list_installed
+          ;;
+        "")
+          list_available
+          ;;
+        *)
+          echo "Usage: sk8 list [--installed]" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+    config)
+      local fingerprint pkg_count installed_count
+      echo "sk8 configuration"
+      echo "================="
+      echo ""
+      echo "  Config file:   ${SK8_DIR}/config"
+      echo "  Cache dir:     ${SK8_DIR}/cache"
+      echo "  Package dir:   ${SK8_DIR}/package"
+      echo "  Server URL:    ${SK8_RB_URL}"
+      echo "  Bin dir:       ${SK8_BIN_DIR}"
+      if [[ -f "${SK8_DIR}/cache/rollerblades.pub" ]]; then
+        fingerprint=$(get_fingerprint "${SK8_DIR}/cache/rollerblades.pub")
+        echo "  Signing key:   ${fingerprint:0:16}...${fingerprint: -16}"
+      else
+        echo "  Signing key:   (not found)"
+      fi
+      pkg_count=0
+      if [[ -f "${SK8_DIR}/cache/packages.txt" ]]; then
+        pkg_count=$(grep -cv '^#' "${SK8_DIR}/cache/packages.txt" 2>/dev/null || echo "0")
+      fi
+      installed_count=0
+      if [[ -d "${SK8_DIR}/package" ]]; then
+        installed_count=$(find "${SK8_DIR}/package" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+      fi
+      echo "  Packages:      ${pkg_count} available, ${installed_count} installed"
+      ;;
+    edit)
+      "${EDITOR:-nano}" "${SK8_DIR}/config"
+      ;;
+    *)
+      echo "Usage: sk8 <command> [package_name]"
+      echo ""
+      echo "Commands:"
+      echo "  setup             Configure sk8 (interactive)"
+      echo "  setup <pkg>       Run package setup wizard"
+      echo "  install <pkg>     Install a package"
+      echo "  remove <pkg>      Remove a package"
+      echo "  reinstall <pkg>   Remove and reinstall a package"
+      echo "  update            Fetch latest package index"
+      echo "  upgrade [pkg]     Upgrade all packages or a specific package"
+      echo "  list              List available packages"
+      echo "  list --installed  List installed packages"
+      echo "  config            Show current configuration"
+      echo "  edit              Open config in \${EDITOR}"
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
 
