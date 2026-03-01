@@ -488,6 +488,95 @@ run_package_setup() {
   return ${rc}
 }
 
+# Update sk8 itself from the configured rollerblades server
+# The server must have 'sk8' listed as a package in repos.txt
+self_update() {
+  # Resolve canonical path to the running sk8 script
+  local self
+  self=$(readlink -f "${BASH_SOURCE[0]}") || {
+    echo "Error: Could not determine sk8 script location." >&2
+    return 1
+  }
+
+  if [[ ! -w "${self}" ]]; then
+    echo "Error: sk8 at '${self}' is not writable. Try with sudo." >&2
+    return 1
+  fi
+
+  echo "Fetching sk8 update from ${SK8_RB_URL}..."
+
+  dl "sk8.tar.gz" || {
+    echo "Error: Could not download sk8 package." >&2
+    echo "Make sure 'sk8' is listed as a package on the server." >&2
+    return 1
+  }
+
+  verify_package "sk8" || {
+    cleanup_cache "sk8"
+    return 1
+  }
+
+  local tmp_dir
+  tmp_dir=$(mktemp -d) || {
+    echo "Error: Failed to create temporary directory." >&2
+    cleanup_cache "sk8"
+    return 1
+  }
+
+  tar -xz --no-same-owner -C "${tmp_dir}" -f "${SK8_DIR}/cache/sk8.tar.gz" || {
+    echo "Error: Failed to extract sk8 package." >&2
+    cleanup_cache "sk8"
+    rm -rf "${tmp_dir}"
+    return 1
+  }
+
+  cleanup_cache "sk8"
+
+  # Find the sk8 script: read EXECUTABLE from manifest, fall back to file named 'sk8'
+  local new_sk8="" new_version=""
+  if [[ -f "${tmp_dir}/sk8.manifest" ]]; then
+    local exec_path
+    exec_path=$(grep '^EXECUTABLE=' "${tmp_dir}/sk8.manifest" | head -1 | cut -d= -f2-)
+    if [[ -n "${exec_path}" ]] && validate_manifest_path "${exec_path}" && [[ -f "${tmp_dir}/${exec_path}" ]]; then
+      new_sk8="${tmp_dir}/${exec_path}"
+    fi
+    new_version=$(grep '^VERSION=' "${tmp_dir}/sk8.manifest" | head -1 | cut -d= -f2-)
+  fi
+  if [[ -z "${new_sk8}" && -f "${tmp_dir}/sk8" ]]; then
+    new_sk8="${tmp_dir}/sk8"
+  fi
+
+  if [[ -z "${new_sk8}" ]]; then
+    echo "Error: Could not find sk8 script in downloaded package." >&2
+    rm -rf "${tmp_dir}"
+    return 1
+  fi
+
+  # Sanity check: must start with a shebang
+  if ! head -1 "${new_sk8}" | grep -q '^#!'; then
+    echo "Error: Downloaded file does not appear to be a valid script." >&2
+    rm -rf "${tmp_dir}"
+    return 1
+  fi
+
+  # Atomically replace the running script (temp file on same filesystem as $self)
+  local self_tmp="${self}.new"
+  cp "${new_sk8}" "${self_tmp}" && chmod +x "${self_tmp}" && mv "${self_tmp}" "${self}" || {
+    echo "Error: Failed to replace sk8 at '${self}'." >&2
+    rm -f "${self_tmp}"
+    rm -rf "${tmp_dir}"
+    return 1
+  }
+
+  rm -rf "${tmp_dir}"
+
+  if [[ -n "${new_version}" ]]; then
+    echo "sk8 updated to version ${new_version}."
+  else
+    echo "sk8 has been updated."
+  fi
+}
+
 # Clean up cached files for a package
 cleanup_cache() {
   local pkg="$1"
@@ -937,6 +1026,9 @@ main() {
     edit)
       "${EDITOR:-nano}" "${SK8_DIR}/config"
       ;;
+    self-update)
+      self_update
+      ;;
     *)
       echo "Usage: sk8 <command> [package_name]"
       echo ""
@@ -952,6 +1044,7 @@ main() {
       echo "  list --installed  List installed packages"
       echo "  config            Show current configuration"
       echo "  edit              Open config in \${EDITOR}"
+      echo "  self-update       Update sk8 itself from the server"
       exit 1
       ;;
   esac

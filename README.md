@@ -27,6 +27,7 @@ curl -sSf https://raw.githubusercontent.com/chr1573r/sk8/main/install.sh | sh -s
 - Automatic symlinking of package executables with conflict detection
 - Version tracking for installed packages
 - Non-interactive setup via environment variables
+- Self-update from the rollerblades server (`sk8 self-update`)
 
 ## Quick Start
 
@@ -63,14 +64,17 @@ sk8 upgrade           # Upgrade all packages
 |---------|-------------|
 | `sk8 setup` | Interactive setup wizard |
 | `sk8 setup <pkg>` | Run a package's setup wizard |
-| `sk8 update` | Fetch package index from server |
-| `sk8 upgrade` | Upgrade all installed packages |
-| `sk8 upgrade <pkg>` | Upgrade a specific package |
 | `sk8 install <pkg>` | Install a package |
 | `sk8 remove <pkg>` | Remove a package |
 | `sk8 reinstall <pkg>` | Remove and reinstall a package |
+| `sk8 update` | Fetch package index from server |
+| `sk8 upgrade` | Upgrade all installed packages |
+| `sk8 upgrade <pkg>` | Upgrade a specific package |
 | `sk8 list` | List available packages (with versions) |
 | `sk8 list --installed` | List installed packages (with versions) |
+| `sk8 config` | Show current configuration and status |
+| `sk8 edit` | Open config file in `$EDITOR` |
+| `sk8 self-update` | Update sk8 itself from the server |
 
 ## Configuration
 
@@ -217,6 +221,31 @@ sk8 install another-tool
 ```bash
 sk8 list --installed
 ```
+
+## Self-Update
+
+sk8 can update itself from the configured rollerblades server:
+
+```bash
+sk8 self-update
+```
+
+The update goes through the same download and signature verification pipeline as any other package — the new sk8 binary must be signed by the server's trusted key before it replaces the running script.
+
+### Server-side setup
+
+Add `sk8` to the server's `repos.txt` pointing at the sk8 git repository. Rollerblades will then build and serve `sk8.tar.gz` + `sk8.signature` automatically.
+
+The sk8 repo should include a `sk8.manifest` so the updater knows which file is the executable and can display the new version:
+
+```
+NAME=sk8
+VERSION=2.x
+DESCRIPTION=Package manager for rollerblades
+EXECUTABLE=sk8
+```
+
+If no manifest is present, sk8 falls back to looking for a file named `sk8` at the root of the package archive.
 
 ## Server Setup
 
