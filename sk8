@@ -26,14 +26,12 @@ _spinner_pid=""
 # Does nothing when stderr is not a terminal.
 start_spinner() {
   [[ -t 2 ]] || return 0
-  tput sc >&2
-  tput civis >&2
+  tput civis >&2 2>/dev/null
   (
     local frames=('...' '')
     local i=0
     while true; do
-      tput rc >&2
-      printf "${PINK}sk8${DEF} ${DARKGRAY}>${DEF}%s\033[K" "${frames[$i]:+ ${frames[$i]}}" >&2
+      printf "\r${PINK}sk8${DEF} ${DARKGRAY}>${DEF}%s\033[K" "${frames[$i]:+ ${frames[$i]}}" >&2
       i=$(( (i + 1) % 2 ))
       sleep 0.5
     done
@@ -46,8 +44,7 @@ stop_spinner() {
   [[ -n "${_spinner_pid}" ]] || return
   kill "${_spinner_pid}" 2>/dev/null
   wait "${_spinner_pid}" 2>/dev/null
-  tput rc >&2 2>/dev/null
-  printf '\033[K' >&2
+  printf '\r\033[K' >&2
   tput cnorm >&2 2>/dev/null
   _spinner_pid=""
 }
@@ -86,39 +83,6 @@ save_config() {
     echo "SK8_RB_URL=\"${url}\""
     echo "SK8_BIN_DIR=\"${bin_dir}\""
   } > "${SK8_DIR}/config"
-}
-
-# Suggest adding SK8_BIN_DIR to PATH via ~/.bashrc if not already present.
-# Always prints the export command; prompts to append it to ~/.bashrc.
-suggest_path_bashrc() {
-  [[ -t 0 ]] || return 0
-
-  local export_line="export PATH=\"${SK8_BIN_DIR}:\$PATH\""
-  echo ""
-  echo "To use executables from installed packages, add ${SK8_BIN_DIR} to your PATH:"
-  echo "  ${export_line}"
-  echo ""
-
-  # Already in current PATH — nothing more to do
-  if [[ ":${PATH}:" == *":${SK8_BIN_DIR}:"* ]]; then
-    return 0
-  fi
-
-  if [[ -f "${HOME}/.bashrc" ]] && grep -qF "${SK8_BIN_DIR}" "${HOME}/.bashrc" 2>/dev/null; then
-    echo "(Already found in ~/.bashrc)"
-    return 0
-  fi
-
-  if [[ ! -f "${HOME}/.bashrc" ]]; then
-    echo "(~/.bashrc not found — add the line manually to your shell config)"
-    return 0
-  fi
-
-  read -rp "Add to ~/.bashrc automatically? [y/n]: " _ans
-  if [[ "${_ans}" == "y" || "${_ans}" == "Y" ]]; then
-    printf '\n# Added by sk8\n%s\n' "${export_line}" >> "${HOME}/.bashrc"
-    echo "Done. Run 'source ~/.bashrc' or open a new terminal to apply."
-  fi
 }
 
 # Interactive setup wizard
@@ -234,8 +198,7 @@ run_setup() {
   echo "You can now use sk8 to install packages:"
   echo "  sk8 list              # Show available packages"
   echo "  sk8 install <pkg>     # Install a package"
-
-  suggest_path_bashrc
+  echo ""
 
   # Set the URL so the rest of the script can use it
   SK8_RB_URL="${server_url}"
