@@ -43,11 +43,27 @@ echo "sk8 installed to: $SK8_INSTALL_DIR/sk8"
 case ":$PATH:" in
     *":$SK8_INSTALL_DIR:"*) ;;
     *)
+        _export_line="export PATH=\"$SK8_INSTALL_DIR:\$PATH\""
         echo ""
         echo "NOTE: $SK8_INSTALL_DIR is not in your PATH."
         echo "Add it by appending this to your shell profile (~/.bashrc or ~/.zshrc):"
         echo ""
-        echo "  export PATH=\"$SK8_INSTALL_DIR:\$PATH\""
+        echo "  $_export_line"
+        echo ""
+        if [ -t 0 ] && [ -f "$HOME/.bashrc" ]; then
+            if grep -qF "$SK8_INSTALL_DIR" "$HOME/.bashrc" 2>/dev/null; then
+                echo "(Already found in ~/.bashrc)"
+            else
+                printf 'Add to ~/.bashrc automatically? [y/n]: '
+                read -r _ans || true
+                case "$_ans" in
+                    y|Y)
+                        printf '\n# Added by sk8 installer\n%s\n' "$_export_line" >> "$HOME/.bashrc"
+                        echo "Done. Run 'source ~/.bashrc' or open a new terminal to apply."
+                        ;;
+                esac
+            fi
+        fi
         ;;
 esac
 
